@@ -505,7 +505,8 @@ The backend values in `backend.tf` are written directly because Terraform reads 
 Code: `terraform/modules/{eks,ecr,secrets,iam}/`, called from `terraform/environments/dev/main.tf`.
 
 ### Fill in two values first
-In `terraform/environments/dev/terraform.tfvars`, replace both `REPLACE_ME` values:
+In `terraform/environments/dev/terraform.tfvars`, set these two values (this build: `kubernetes_version = "1.36"`,
+`admin_cidrs = ["103.141.54.90/32"]`, the office public IP in Kochi):
 ```bash
 # 1. Kubernetes version: pick the newest with "STANDARD_SUPPORT"
 aws eks describe-cluster-versions \
@@ -524,8 +525,34 @@ curl -s https://checkip.amazonaws.com
 cd ~/workspace/Task/aws-platform/terraform/environments/dev
 terraform init          # needed again: new modules (eks, iam) were added
 terraform plan -out=tfplan
+terraform show -no-color tfplan > tfplan.readable.txt   # optional: readable copy for review
 terraform apply tfplan
 ```
+- The saved plan is a **binary zip**, whatever its name; apply it with the exact name given to `-out`.
+  Name it `tfplan` (not `.txt`) to avoid confusion. Both `tfplan` and `tfplan.*` are git-ignored.
+- A saved plan is tied to the moment it was made: after any code, tfvars or state change, `apply` refuses it
+  ("Saved plan is stale") and you plan again.
+
+### Plan review (this build)
+`Plan: 86 to add, 0 to change, 0 to destroy.` Checked before applying:
+
+| Area | In the plan |
+|---|---|
+| VPC | `10.0.0.0/16`; private `/19` and public `/24` subnets in ap-south-1a/b/c; `map_public_ip_on_launch = false` |
+| NAT / internet | 1 NAT Gateway, 1 Elastic IP, 1 Internet Gateway |
+| Endpoints, flow logs | 5 VPC endpoints; 1 flow log with a 7-day log group |
+| EKS | `platform-dev`, version 1.36; private endpoint on; public endpoint only `103.141.54.90/32`; secrets encryption |
+| Access | `authentication_mode = API`; creator admin off; one access entry (the IAM user) with `AmazonEKSClusterAdminPolicy` |
+| Add-ons | vpc-cni (prefix delegation, network policy), kube-proxy, coredns |
+| Nodes | On-Demand t3.medium, 2–3 nodes; 30 GB encrypted gp3; IMDSv2 required, hop limit 1 (pods cannot use the node's IAM role); SSM policy |
+| ECR, secrets | `my-app` immutable + scan on push; 3 empty secrets with their own KMS key |
+| IRSA | `platform-dev-alb-controller`, `-external-secrets`, `-my-app`; cluster OIDC provider |
+| Security groups | No inbound rule open to `0.0.0.0/0` (only outbound rules use it) |
+
+Resource count by type: 13 security group rules, 9 role policy attachments, 6 subnets, 6 route table associations,
+6 IAM roles, 5 VPC endpoints, 4 IAM policies, 3 security groups, 3 secrets, 3 EKS add-ons, 2 KMS keys (EKS secrets,
+app secrets), 2 log groups (EKS, flow logs), plus the VPC, NAT, IGW, EIP, cluster, node group, launch template,
+access entry, OIDC provider, ECR repository and lifecycle policy.
 
 ### What gets created
 
@@ -547,15 +574,23 @@ terraform apply tfplan
 | System nodes On-Demand | Platform add-ons (ArgoCD, Karpenter, etc.) must not vanish with a Spot interruption; app nodes use Spot via Karpenter (Day 4) |
 
 ### After the apply
+Result in this build: `Apply complete! Resources: 86 added, 0 changed, 0 destroyed.`, and all checks below passed.
+
 ```bash
-# Connect kubectl
+# Outputs: cluster name/endpoint, ECR URL, secret names, IRSA role ARNs (used on Days 3–4)
+terraform output
+
+# Connect kubectl (writes the cluster entry to ~/.kube/config)
 aws eks update-kubeconfig --name platform-dev --region ap-south-1
-kubectl get nodes -o wide            # 2 nodes, Ready, in private subnets (10.0.x.x)
+kubectl version | grep -i version    # client 1.37, server 1.36
+kubectl get nodes -o wide            # 2 nodes, Ready, internal IPs 10.0.x.x, no external IP
 kubectl get pods -A                  # aws-node, kube-proxy, coredns Running
-kubectl version | grep Server        # matches kubernetes_version
 
 # Check the pod limit from prefix delegation
 kubectl get nodes -o jsonpath='{.items[*].status.allocatable.pods}'   # 110 per node
+
+# Check network policy enforcement is installed
+kubectl get ds aws-node -n kube-system -o jsonpath='{.spec.template.spec.containers[*].name}'   # aws-node aws-eks-nodeagent
 
 # Store the app secret values (example: one key/value pair per namespace)
 for ns in dev staging production; do
@@ -564,6 +599,28 @@ for ns in dev staging production; do
 done
 ```
 Store real values the same way; never put them in a file in the repository.
+
+**Names created (for later days):**
+
+| Item | Value |
+|---|---|
+| Cluster | `platform-dev` (Kubernetes 1.36) |
+| ECR repository | `471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app` |
+| Secrets | `platform-dev/my-app/dev`, `platform-dev/my-app/staging`, `platform-dev/my-app/production` |
+| IRSA: ALB controller | `arn:aws:iam::471112815218:role/platform-dev-alb-controller` (service account `kube-system/aws-load-balancer-controller`) |
+| IRSA: External Secrets | `arn:aws:iam::471112815218:role/platform-dev-external-secrets` (service account `external-secrets/external-secrets`) |
+| IRSA: application | `arn:aws:iam::471112815218:role/platform-dev-my-app` (service account `my-app` in `dev`, `staging`, `production`) |
+
+**What runs where from now on:** Terraform manages AWS resources and changes rarely. Everything inside the
+cluster (add-ons, the application) is deployed by ArgoCD from Git (Day 3 onwards). The next Terraform change is
+Karpenter's IAM role and queue on Day 4; from Day 8 Terraform runs only through the pipeline.
+
+| Never share or commit | Why |
+|---|---|
+| `~/.aws/credentials` | AWS access key |
+| `~/.config/gh/hosts.yml` | GitHub token |
+| `~/.kube/config` | Cluster connection details (no long-lived secret, but personal) |
+| Secret values | Belong only in Secrets Manager |
 
 ---
 
@@ -578,14 +635,14 @@ Tick each item as it is done.
 - [x] `aws-platform` repository created on GitHub (`AjinOrg/aws-platform`, public)
 - [ ] `my-app` repository created on GitHub
 - [x] CloudFormation bootstrap deployed and verified (state bucket, KMS key, GitHub OIDC, pipeline roles)
-- [ ] VPC created with Terraform (3 AZs, NAT, endpoints)
+- [x] VPC created with Terraform (3 AZs, NAT, endpoints, flow logs)
 
 **Day 2: EKS cluster and supporting AWS resources**
-- [ ] EKS cluster and system node group
-- [ ] ECR repository, Secrets Manager secret, IRSA roles
+- [x] EKS cluster `platform-dev` (1.36) and system node group (2 × t3.medium)
+- [x] ECR repository, Secrets Manager secrets, IRSA roles (one apply with the VPC: 86 resources)
 
 **Day 3: Dev environment and GitOps**
-- [ ] `kubectl` connected to the Dev cluster
+- [x] `kubectl` connected to the Dev cluster
 - [ ] ArgoCD installed, app-of-apps structure in place
 - [ ] AWS Load Balancer Controller, certificate, DNS record and HTTPS ingress
 
@@ -629,6 +686,8 @@ Tick each item as it is done.
 | `docker` not found in WSL | Turn on WSL integration for Ubuntu in Docker Desktop and restart it |
 | GitHub API rate limit during the install script | Wait a few minutes, or run `gh auth login` first and try again |
 | Bootstrap fails with `EntityAlreadyExists` on the OIDC provider | The account already has one: redeploy with `CreateOidcProvider=false` |
+| `kubectl` hangs or times out | Your public IP changed: `curl -s https://checkip.amazonaws.com`, update `admin_cidrs` in `terraform.tfvars`, plan and apply |
+| `terraform apply` says "Saved plan is stale" | Something changed after the plan: run `terraform plan -out=tfplan` again |
 | `terraform init` cannot reach the state bucket | Check the profile and region; the bucket name in `backend.tf` must match the bootstrap output |
 
 ---
@@ -642,7 +701,8 @@ Resources cost money **only while they exist**. Rough Dev cost while running (ap
 | EKS control plane | ~$2.40 / day |
 | NAT Gateway (1 shared) | ~$1.10 / day + data |
 | VPC interface endpoints (4 × 3 AZs) | ~$3 / day |
-| Nodes (small, Spot) | ~$1–3 / day |
+| System nodes (2 × t3.medium, On-Demand) | ~$2.20 / day |
+| App nodes (Karpenter, Spot, from Day 4) | ~$1–2 / day |
 | Load balancer | ~$0.55 / day |
 | State bucket, KMS key | a few cents / day (KMS key ~$1 / month) |
 
