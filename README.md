@@ -287,17 +287,61 @@ aws iam list-open-id-connect-providers                       # an existing GitHu
 
 ## 7. Step 3: Connect to GitHub
 
+### Log in
 ```bash
-git config --global user.name  "Your Name"
-git config --global user.email "your-email@example.com"
-gh auth login        # GitHub.com → HTTPS → Yes (authenticate Git) → Login with a web browser
+gh auth login -s read:org,workflow   # GitHub.com → HTTPS → Yes (authenticate Git) → Login with a web browser
 gh auth status
 gh api user --jq .login            # the account you are logged in as (AjinUrolime)
 gh api user/orgs --jq '.[].login'  # organizations you belong to (AjinOrg)
 ```
+- `read:org` lets `gh` see the organization; `workflow` allows pushing files in `.github/workflows/` (Day 6).
+- In the browser, also click **Grant** next to the organization under *Organization access*; otherwise
+  `gh repo create AjinOrg/...` fails. (Later: GitHub → Settings → Applications → Authorized OAuth Apps → GitHub CLI.)
+- WSL cannot open a browser by itself: `echo 'export BROWSER=explorer.exe' >> ~/.bashrc && source ~/.bashrc`.
+- The token is stored in `~/.config/gh/hosts.yml`, outside the project. `gh auth logout` removes it.
 
 The **owner** used in Step 4 is whoever owns the repositories: here the organization `AjinOrg`, not the
 personal account that logs in. The AWS roles trust exactly `repo:<owner>/<repo>`, and the match is case-sensitive.
+
+### Git identity
+```bash
+git config --global user.name  "Ajin Vijayan"
+git config --global user.email "<github-noreply-address>"   # GitHub → Settings → Emails; keeps your email private
+git config --global init.defaultBranch main
+```
+
+### Create the repositories
+```bash
+cd ~/workspace/Task/aws-platform
+git init -b main
+
+# 1. Confirm the ignore rules work (prints the rule that matched; prints nothing if NOT ignored)
+git check-ignore -v terraform/environments/dev/.terraform/modules
+git check-ignore -v terraform/environments/dev/tfplan
+
+# 2. Stage and review
+git add .
+git status        # must NOT list .terraform/, tfplan*, *.tfstate; must list .terraform.lock.hcl
+
+# 3. Scan exactly what will be committed
+gitleaks git --pre-commit --staged -v      # "no leaks found"
+
+# 4. Commit and create the repository (creates it on GitHub, adds remote "origin", pushes main)
+git commit -m "Days 1-2: bootstrap, VPC, EKS, ECR, secrets, IRSA"
+gh repo create AjinOrg/aws-platform --public --source=. --remote=origin --push
+git remote -v
+
+# 5. The application repository (empty until Day 5)
+cd ~/workspace/Task
+gh repo create AjinOrg/my-app --public --clone
+```
+
+| Point | Explanation |
+|---|---|
+| One `.gitignore` at the root | A pattern without a leading `/` (like `.terraform/`) matches at any depth, so it covers every environment folder |
+| `.terraform.lock.hcl` **is** committed | It pins the exact provider versions and checksums so the pipeline uses the same verified files |
+| `gitleaks dir .` vs `gitleaks git --staged` | `dir` scans every file on disk, including ignored downloads in `.terraform/` (their example keys show up as findings). `git --staged` scans only what goes into the commit; that is the check that matters |
+| Public repositories | On a free organization, branch protection and Environment reviewers (needed on Days 6 and 8) work only on public repositories. Private needs GitHub Team. No secrets are in the code; the AWS account ID is not a credential |
 
 ---
 
@@ -530,8 +574,9 @@ Tick each item as it is done.
 **Day 1: Setup, state backend and network**
 - [x] Tools installed (Step 1)
 - [x] AWS access working (Step 2: profile `task`, temporary IAM user keys)
-- [ ] GitHub connected (Step 3)
-- [ ] `aws-platform` and `my-app` repositories created on GitHub
+- [x] GitHub connected (Step 3: `gh` logged in as `AjinUrolime`, organization `AjinOrg` granted)
+- [x] `aws-platform` repository created on GitHub (`AjinOrg/aws-platform`, public)
+- [ ] `my-app` repository created on GitHub
 - [x] CloudFormation bootstrap deployed and verified (state bucket, KMS key, GitHub OIDC, pipeline roles)
 - [ ] VPC created with Terraform (3 AZs, NAT, endpoints)
 
@@ -580,6 +625,7 @@ Tick each item as it is done.
 | `Unable to locate credentials` / `Token has expired` | SSO: run `aws sso login`. Access keys: check `echo $AWS_PROFILE` is `task` |
 | `aws sts get-caller-identity` shows the wrong account | Check `echo $AWS_PROFILE` |
 | Resources appear in the wrong region | Check `echo $AWS_REGION` is `ap-south-1` |
+| `gh ... --web` fails: `xdg-open ... not found` | WSL has no browser opener: `echo 'export BROWSER=explorer.exe' >> ~/.bashrc && source ~/.bashrc` |
 | `docker` not found in WSL | Turn on WSL integration for Ubuntu in Docker Desktop and restart it |
 | GitHub API rate limit during the install script | Wait a few minutes, or run `gh auth login` first and try again |
 | Bootstrap fails with `EntityAlreadyExists` on the OIDC provider | The account already has one: redeploy with `CreateOidcProvider=false` |
