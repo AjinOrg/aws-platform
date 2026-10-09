@@ -1,0 +1,26 @@
+# App-of-apps entry point: the only manifest applied by hand (kubectl apply -f).
+# It tells ArgoCD to install every Application found in gitops/platform/*.yaml and gitops/apps/*.yaml.
+# Adding a component = adding a file there and merging it; ArgoCD picks it up automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # No deletion finalizer on purpose: deleting "root" must not cascade-delete the whole platform
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/AjinOrg/aws-platform.git
+    targetRevision: main
+    path: gitops
+    directory:
+      recurse: true
+      # Only Application/AppProject files; values files under gitops/apps/<app>/ are not manifests
+      include: "{platform/*.yaml,apps/*.yaml}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true    # a file removed from Git = Application removed from the cluster
+      selfHeal: true # manual changes in the cluster are reverted to what Git says

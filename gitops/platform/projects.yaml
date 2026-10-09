@@ -1,0 +1,20 @@
+# ArgoCD project for platform add-ons: limits WHERE their manifests and charts may come from.
+# A new chart repository must be added to sourceRepos here (reviewed) before an add-on can use it.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10" # created before the Applications that use it
+spec:
+  description: Cluster add-ons managed by the platform team
+  sourceRepos:
+    - https://github.com/AjinOrg/aws-platform.git
+    - https://aws.github.io/eks-charts # AWS Load Balancer Controller
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*" # add-ons live in several namespaces (kube-system, external-secrets, ...)
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*" # add-ons install CRDs, webhooks and cluster roles

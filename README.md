@@ -18,6 +18,7 @@ repository, **`my-app`**.
 8. [Step 4: Bootstrap the Terraform State and Pipeline Access](#8-step-4-bootstrap-the-terraform-state-and-pipeline-access)
 9. [Step 5: Build the Dev Network (VPC)](#9-step-5-build-the-dev-network-vpc)
 10. [Step 6: EKS Cluster, ECR, Secrets and IRSA (Day 2)](#10-step-6-eks-cluster-ecr-secrets-and-irsa-day-2)
+    - [Step 7: ArgoCD, App-of-Apps and the Load Balancer Controller (Day 3)](#10b-step-7-argocd-app-of-apps-and-the-load-balancer-controller-day-3)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -621,6 +622,93 @@ Karpenter's IAM role and queue on Day 4; from Day 8 Terraform runs only through 
 | `~/.config/gh/hosts.yml` | GitHub token |
 | `~/.kube/config` | Cluster connection details (no long-lived secret, but personal) |
 | Secret values | Belong only in Secrets Manager |
+
+---
+
+## 10b. Step 7: ArgoCD, App-of-Apps and the Load Balancer Controller (Day 3)
+
+Code: `gitops/` (see [gitops/README.md](gitops/README.md)). No domain is used in this build: the app is reached
+on the load balancer's own AWS address over HTTP. HTTPS (ACM certificate + Route53 record) can be added later by
+adding two annotations to the Ingress and a DNS record; nothing else changes.
+
+### How it fits together
+```
+You (once):  helm install ArgoCD  ──▶  kubectl apply root-app.yaml
+                                              │
+ArgoCD:      reads github.com/AjinOrg/aws-platform, folder gitops/
+                ├── platform/projects.yaml                  → AppProject "platform"
+                └── platform/aws-load-balancer-controller.yaml → Helm chart into kube-system
+                                                              (IRSA role platform-dev-alb-controller)
+From now on: a merged commit in gitops/ = a change in the cluster (within ~3 minutes)
+```
+
+### Install
+```bash
+cd ~/workspace/Task/aws-platform
+git pull                                    # root-app.yaml points at GitHub: the gitops/ files must be pushed first
+
+# 1. ArgoCD (the only Helm install done by hand), from the chart's OCI registry on ghcr.io
+helm upgrade --install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd -n argocd --create-namespace \
+  --version 10.10.1 -f gitops/bootstrap/argocd-values.yaml --wait --timeout 10m
+kubectl get pods -n argocd                  # all Running, on the system nodes
+
+# 2. The app-of-apps entry point
+kubectl apply -f gitops/bootstrap/root-app.yaml
+kubectl get applications -n argocd          # root, aws-load-balancer-controller → Synced / Healthy
+```
+
+### Open the ArgoCD UI (not exposed to the internet)
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443      # keep this terminal open
+# second terminal:
+kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d; echo
+```
+Open https://localhost:8080 (accept the self-signed certificate warning), user `admin`. Then change the password
+and remove the initial one:
+```bash
+argocd login localhost:8080 --username admin --insecure
+argocd account update-password
+kubectl delete secret argocd-initial-admin-secret -n argocd
+```
+
+### Optional: ArgoCD UI on a URL (VPN), prepared but disabled
+This build uses port-forward only. `gitops/bootstrap/argocd-values.yaml` holds a **commented** Ingress block for
+later, with two options:
+
+| Option | When | Load balancer |
+|---|---|---|
+| A | VPN into the VPC (AWS Client VPN or site-to-site) | `scheme: internal`, private IPs only, not on the internet |
+| B | Office VPN with a fixed public IP | `scheme: internet-facing` + `inbound-cidrs: <vpn-ip>/32` |
+
+To enable: uncomment `global.domain: ""` and the `server.ingress` block, choose A or B, run `helm upgrade` with the
+same values file, and read the URL from `kubectl get ingress -n argocd`. Notes:
+- `global.domain: ""` removes the host rule; otherwise the chart's default host `argocd.example.com` makes the
+  ALB answer 404 on its own DNS name.
+- Without a domain the listener is HTTP, so the password crosses the network unencrypted between browser and ALB:
+  acceptable only with option A (the VPN encrypts it). Option B needs an ACM certificate first (lines included,
+  commented).
+- No Terraform or IAM change is needed: the controller's IRSA role and the subnet tags already cover it.
+
+### Check the load balancer controller
+```bash
+kubectl get deploy aws-load-balancer-controller -n kube-system      # 2/2 ready
+kubectl get sa aws-load-balancer-controller -n kube-system -o yaml | grep role-arn
+kubectl logs -n kube-system deploy/aws-load-balancer-controller | grep -iE "error|vpc" | head
+kubectl get ingressclass                                             # alb
+```
+
+| Setting | Why |
+|---|---|
+| ArgoCD installed with Helm by hand, everything else by ArgoCD | Something has to install ArgoCD first; after that, Git is the only way in |
+| `server.service.type: ClusterIP` + port-forward | The ArgoCD UI is never on the internet; access needs cluster credentials |
+| `exec.enabled: false`, Dex off, notifications off | Fewer features = smaller attack surface; turned on when needed |
+| AppProject `platform` | Add-ons may only come from this repository and listed chart repositories |
+| Root app has no finalizer | Deleting `root` by mistake does not delete the whole platform |
+| `prune` + `selfHeal` | Removing a file removes the component; manual cluster edits are reverted |
+| Load balancer controller `vpcTags: Name=platform-dev` | Pods cannot read instance metadata (hop limit 1), so the VPC is found by its tag, not by asking the node |
+| `enableServiceMutatorWebhook: false` | The controller handles Ingresses only and does not take over other Services |
+| Chart versions pinned (ArgoCD 10.10.1, controller 3.6.0) | Upgrades are reviewed one-line changes |
+| ArgoCD chart pulled from `oci://ghcr.io/argoproj/argo-helm` | The https chart repository serves files from GitHub release assets, which timed out on this network; the OCI copy is the same chart (digest `sha256:1320fc2d…`) |
 
 ---
 

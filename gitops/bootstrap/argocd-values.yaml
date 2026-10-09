@@ -1,0 +1,70 @@
+# Helm values for the one-time ArgoCD install (chart argo/argo-cd 10.10.1, ArgoCD v3.5.4).
+#   helm upgrade --install argocd oci://ghcr.io/argoproj/argo-helm/argo-cd -n argocd --create-namespace \
+#     --version 10.10.1 -f gitops/bootstrap/argocd-values.yaml --wait
+# (OCI registry instead of the https chart repo: the https repo's downloads from GitHub release assets timed out)
+# After this, ArgoCD installs everything else from Git (gitops/bootstrap/root-app.yaml).
+
+global:
+  # Platform components run on the On-Demand system node group, not on (Spot) application nodes
+  nodeSelector:
+    node-role: system
+  # OPTIONAL, only together with server.ingress below: without a domain the Ingress must have no host rule,
+  # otherwise the chart's default host "argocd.example.com" makes the ALB return 404 on its own DNS name.
+  # domain: ""
+
+configs:
+  params:
+    server.insecure: false # the UI/API is served over TLS even through port-forward
+  cm:
+    admin.enabled: true    # local admin until SSO is configured
+    exec.enabled: false    # no "terminal into pod" from the UI
+    timeout.reconciliation: 180s
+
+# No SSO (Dex) yet: access is through kubectl port-forward with the admin password
+dex:
+  enabled: false
+
+# Slack/email notifications are not configured yet
+notifications:
+  enabled: false
+
+# Keep the Application CRDs if the chart is ever uninstalled, so Applications are not deleted with it
+crds:
+  keep: true
+
+server:
+  service:
+    type: ClusterIP # not exposed to the internet; reach it with kubectl port-forward
+
+  # ---------------------------------------------------------------------------------------------
+  # OPTIONAL: reach the UI on a URL through a load balancer (VPN access). Disabled: this build uses
+  #   kubectl port-forward svc/argocd-server -n argocd 8080:443
+  # To enable: uncomment global.domain above and the ingress block below, pick option A or B, then
+  #   helm upgrade argocd oci://ghcr.io/argoproj/argo-helm/argo-cd -n argocd --version 10.10.1 \
+  #     -f gitops/bootstrap/argocd-values.yaml
+  #   kubectl get ingress -n argocd      # ADDRESS = the URL (load balancer DNS name), ready in ~3 min
+  #
+  # A. VPN into the VPC (AWS Client VPN / site-to-site): internal ALB, private IPs only, not on the internet
+  # B. Office VPN with a fixed public egress IP: internet-facing ALB that accepts only that IP
+  #
+  # No domain = no ACM certificate = HTTP listener: the password is sent unencrypted between browser and ALB.
+  # Acceptable only with A (the VPN tunnel encrypts it). For B, add HTTPS first: a certificate in ACM, then
+  #   alb.ingress.kubernetes.io/certificate-arn: <acm-certificate-arn>
+  #   alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+  #   alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  # ---------------------------------------------------------------------------------------------
+  # ingress:
+  #   enabled: true
+  #   controller: aws                 # chart adds the extra gRPC route the argocd CLI needs on an ALB
+  #   ingressClassName: alb           # handled by the AWS Load Balancer Controller
+  #   annotations:
+  #     alb.ingress.kubernetes.io/scheme: internal                     # A; for B: internet-facing
+  #     # alb.ingress.kubernetes.io/inbound-cidrs: 103.141.54.90/32    # B only: VPN egress IP(s)
+  #     alb.ingress.kubernetes.io/target-type: ip                      # ALB sends straight to the pod IPs
+  #     alb.ingress.kubernetes.io/backend-protocol: HTTPS              # ALB -> ArgoCD stays TLS (server.insecure: false)
+  #     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+  #     alb.ingress.kubernetes.io/load-balancer-attributes: routing.http.drop_invalid_header_fields.enabled=true
+  #     alb.ingress.kubernetes.io/tags: Project=aws-platform,Environment=dev
+  #   aws:
+  #     serviceType: ClusterIP          # with target-type ip, no NodePort is needed
+  #     backendProtocolVersion: GRPC

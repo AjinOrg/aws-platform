@@ -1,0 +1,48 @@
+# AWS Load Balancer Controller: turns each Kubernetes Ingress (class "alb") into an AWS Application Load Balancer.
+# It calls the AWS API with its IRSA role (created by Terraform, module iam).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io # deleting this Application also removes what it installed
+spec:
+  project: platform
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: 3.6.0 # pinned: upgrades are a reviewed change to this line
+    helm:
+      valuesObject:
+        clusterName: platform-dev
+        region: ap-south-1
+        # Pods cannot reach the instance metadata service (hop limit 1), so the controller finds
+        # the VPC by its Name tag instead of asking the node
+        vpcTags:
+          Name: platform-dev
+        replicaCount: 2
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller # must match the IRSA trust: kube-system:aws-load-balancer-controller
+          annotations:
+            eks.amazonaws.com/role-arn: arn:aws:iam::471112815218:role/platform-dev-alb-controller
+        nodeSelector:
+          node-role: system
+        # Only handle Ingress objects; do not take over every Service of type LoadBalancer
+        enableServiceMutatorWebhook: false
+        podDisruptionBudget:
+          maxUnavailable: 1
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
