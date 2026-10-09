@@ -1,0 +1,18 @@
+# Terraform: provider downloads, local state and saved plans never go into Git
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+tfplan.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local credentials / editor files
+.env
+*.pem
+.vscode/
+.idea/

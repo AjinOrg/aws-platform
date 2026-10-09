@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  aws-platform bootstrap (one time per AWS account): Terraform state bucket, its KMS key,
+  GitHub OIDC provider and the pipeline roles (ECR push, Terraform plan, Terraform apply).
+
+Parameters:
+  StateBucketName:
+    Type: String
+    Description: Globally unique bucket name, e.g. <org>-tfstate-<account-id>
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+  GitHubOrg:
+    Type: String
+    Description: GitHub user or organisation that owns the repositories
+  AppRepo:
+    Type: String
+    Default: my-app
+  PlatformRepo:
+    Type: String
+    Default: aws-platform
+  AppEcrRepository:
+    Type: String
+    Default: my-app
+    Description: ECR repository the app pipeline pushes to (created by Terraform on Day 2)
+  ApplyEnvironment:
+    Type: String
+    Default: terraform-apply
+    Description: GitHub Environment (with required reviewers) that is allowed to use the apply role
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if the account already has the GitHub OIDC provider (only one is allowed)
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  # ---------------------------------------------------------------- state storage
+  StateKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts the Terraform state bucket
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration      # lets IAM policies in this account grant use of the key
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+
+  StateKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aws-platform-tfstate
+      TargetKeyId: !Ref StateKey
+
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref StateBucketName
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt StateKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-state-versions
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 90 }
+
+  StateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StateBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt StateBucket.Arn
+              - !Sub "${StateBucket.Arn}/*"
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  # ---------------------------------------------------------------- GitHub OIDC
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]   # ignored by AWS for GitHub; kept for older APIs
+
+  # Shared by the three roles below: read/write the state files and use the state key
+  StateAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aws-platform-tfstate-access
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt StateBucket.Arn
+          - Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]   # Delete is needed to release the .tflock
+            Resource: !Sub "${StateBucket.Arn}/aws-platform/*"
+          - Effect: Allow
+            Action: [kms:Encrypt, kms:Decrypt, kms:GenerateDataKey, kms:DescribeKey]
+            Resource: !GetAtt StateKey.Arn
+
+  # ---------------------------------------------------------------- pipeline roles
+  EcrPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-platform-ecr-push
+      Description: my-app release pipeline (main branch only) pushes images to ECR
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeImageScanFindings
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${AppEcrRepository}"
+
+  TerraformPlanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-platform-terraform-plan
+      Description: Terraform plan on pull requests (read-only, plus state access)
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${PlatformRepo}:pull_request"
+                  - !Sub "repo:${GitHubOrg}/${PlatformRepo}:ref:refs/heads/main"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess"
+        - !Ref StateAccessPolicy
+
+  TerraformApplyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-platform-terraform-apply
+      Description: Terraform apply, only from the approved GitHub Environment of the platform repo
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${PlatformRepo}:environment:${ApplyEnvironment}"
+      # Terraform creates VPCs, EKS, IAM roles, KMS keys... so it needs broad rights.
+      # The protection is the trust policy above: only an approved job in one environment can assume it.
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess"
+        - !Ref StateAccessPolicy
+
+Outputs:
+  StateBucketName:
+    Value: !Ref StateBucket
+  StateKeyArn:
+    Value: !GetAtt StateKey.Arn
+  EcrPushRoleArn:
+    Value: !GetAtt EcrPushRole.Arn
+  TerraformPlanRoleArn:
+    Value: !GetAtt TerraformPlanRole.Arn
+  TerraformApplyRoleArn:
+    Value: !GetAtt TerraformApplyRole.Arn
