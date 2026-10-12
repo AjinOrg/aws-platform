@@ -6,12 +6,13 @@ locals {
 module "vpc" {
   source = "../../modules/vpc"
 
-  name                    = local.name
-  cidr                    = var.vpc_cidr
-  az_count                = 3
-  single_nat_gateway      = var.single_nat_gateway
-  cluster_name            = local.cluster_name
-  flow_log_retention_days = var.log_retention_days
+  name                       = local.name
+  cidr                       = var.vpc_cidr
+  az_count                   = 3
+  single_nat_gateway         = var.single_nat_gateway
+  enable_interface_endpoints = var.enable_interface_endpoints
+  cluster_name               = local.cluster_name
+  flow_log_retention_days    = var.log_retention_days
 }
 
 module "eks" {
@@ -35,7 +36,8 @@ module "eks" {
 module "ecr" {
   source = "../../modules/ecr"
 
-  name = "my-app"
+  name         = "my-app"
+  force_delete = var.ecr_force_delete
 }
 
 module "secrets" {

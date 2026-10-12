@@ -27,6 +27,14 @@ output "kubeconfig_command" {
   value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.region}"
 }
 
+output "karpenter" {
+  value = {
+    controller_role_arn = module.eks.karpenter_controller_role_arn
+    node_role_name      = module.eks.karpenter_node_role_name
+    queue_name          = module.eks.karpenter_queue_name
+  }
+}
+
 output "ecr_repository_url" {
   value = module.ecr.repository_url
 }

@@ -75,7 +75,11 @@ module "endpoints" {
     }
   }
 
-  endpoints = {
+  endpoints = merge(local.gateway_endpoints, var.enable_interface_endpoints ? local.interface_endpoints : {})
+}
+
+locals {
+  gateway_endpoints = {
     # Gateway endpoint: free, used for ECR image layers (stored in S3) and Terraform/app S3 access
     s3 = {
       service         = "s3"
@@ -83,6 +87,11 @@ module "endpoints" {
       route_table_ids = module.vpc.private_route_table_ids
       tags            = { Name = "${var.name}-s3" }
     }
+  }
+
+  # Interface endpoints cost ~$0.01/hour per AZ each. Without them the same traffic goes through the NAT Gateway
+  # (still encrypted with TLS, but over the internet path and billed per GB).
+  interface_endpoints = {
     ecr_api = {
       service             = "ecr.api"
       private_dns_enabled = true

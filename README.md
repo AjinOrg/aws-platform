@@ -19,6 +19,7 @@ repository, **`my-app`**.
 9. [Step 5: Build the Dev Network (VPC)](#9-step-5-build-the-dev-network-vpc)
 10. [Step 6: EKS Cluster, ECR, Secrets and IRSA (Day 2)](#10-step-6-eks-cluster-ecr-secrets-and-irsa-day-2)
     - [Step 7: ArgoCD, App-of-Apps and the Load Balancer Controller (Day 3)](#10b-step-7-argocd-app-of-apps-and-the-load-balancer-controller-day-3)
+    - [Step 8: Platform Add-ons (Day 4)](#10c-step-8-platform-add-ons-day-4)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -31,7 +32,7 @@ Folders are added step by step as the build progresses.
 
 | Folder | What it holds | Added on |
 |---|---|---|
-| `scripts/` | Helper scripts (tool installer) | Day 1 |
+| `scripts/` | Helper scripts: tool installer; Dev stop/start/status (POC cost saving) | Days 1, 4 |
 | `bootstrap/` | One-time CloudFormation template: Terraform state bucket, KMS key, GitHub login trust and pipeline roles | Day 1 |
 | `terraform/modules/` | Reusable building blocks: `vpc`, `eks`, `ecr`, `iam`, `secrets` | Days 1–2 |
 | `terraform/environments/` | Settings for each environment: `dev`, `staging`, `production` | Days 1–3 |
@@ -93,7 +94,10 @@ The values used by this build. None of them are secrets.
 | Terraform state bucket | `aws-platform-tfstate-471112815218` | State path per environment: `aws-platform/<env>/terraform.tfstate` |
 | State KMS key | `alias/aws-platform-tfstate` | |
 | Dev VPC CIDR | `10.0.0.0/16` | Staging `10.1.0.0/16`, Production `10.2.0.0/16` |
-| Dev cluster name | `platform-dev` | |
+| Dev cluster name | `platform-dev` | Kubernetes 1.36; API reachable only from `103.141.54.90/32` |
+| ArgoCD | Chart 10.10.1 (v3.5.4), namespace `argocd` | UI: `kubectl port-forward svc/argocd-server -n argocd 8080:443` → https://localhost:8080 |
+| GitOps source | `AjinOrg/aws-platform`, branch `main`, folder `gitops/` | ArgoCD watches only this repository |
+| WSL user | `root` (tools and credentials are under `/root`) | Works; a normal user is better practice and can be switched to later |
 
 Set these in every new terminal (or add them to `~/.bashrc`):
 ```bash
@@ -689,13 +693,46 @@ same values file, and read the URL from `kubectl get ingress -n argocd`. Notes:
   commented).
 - No Terraform or IAM change is needed: the controller's IRSA role and the subnet tags already cover it.
 
-### Check the load balancer controller
+### Verification (all passed in this build)
+
+**Installed state:** Helm release `argocd` (revision 1, `deployed`, chart `argo-cd-10.10.1`, ArgoCD `v3.5.4`).
+Five pods Running across both system nodes: `argocd-application-controller-0`, `argocd-server`,
+`argocd-repo-server`, `argocd-applicationset-controller`, `argocd-redis` (no Dex, no notifications).
+
+| # | Test | Command | Expected (✅ seen) |
+|---|---|---|---|
+| 1 | ArgoCD picked up Git | `kubectl get applications -n argocd`<br>`kubectl get appproject -n argocd` | `root` and `aws-load-balancer-controller` Synced / Healthy; projects `default`, `platform` |
+| 2 | Controller running | `kubectl get deploy aws-load-balancer-controller -n kube-system`<br>`kubectl get ingressclass` | `2/2`; pods on system nodes; ingress class `alb` |
+| 3 | IRSA works | see block below | Role ARN `platform-dev-alb-controller`; env `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`; no `AccessDenied` in logs |
+| 4 | UI + admin password | port-forward, log in, `argocd account update-password`, delete initial secret | UI at https://localhost:8080 shows both apps; password changed; `argocd app list` works |
+| 5 | Self-heal | `kubectl scale deploy aws-load-balancer-controller -n kube-system --replicas=0` | Back to `2/2` within seconds: Git says 2 |
+| 6 | GitOps loop | change the memory limit in Git, push, `argocd app get aws-load-balancer-controller --refresh` | Limit changed in the cluster with no kubectl/helm (kept at **300Mi**) |
+
 ```bash
-kubectl get deploy aws-load-balancer-controller -n kube-system      # 2/2 ready
-kubectl get sa aws-load-balancer-controller -n kube-system -o yaml | grep role-arn
-kubectl logs -n kube-system deploy/aws-load-balancer-controller | grep -iE "error|vpc" | head
-kubectl get ingressclass                                             # alb
+# Test 3: IRSA
+kubectl get sa aws-load-balancer-controller -n kube-system \
+  -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'; echo
+kubectl get pod -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller \
+  -o jsonpath='{.items[0].spec.containers[0].env[*].name}'; echo
+kubectl logs -n kube-system deploy/aws-load-balancer-controller --tail=30 | grep -iE "error|denied|vpc" || echo "no errors"
 ```
+
+**What the tests prove**
+
+| Test | Proves |
+|---|---|
+| 1, 2 | App-of-apps works: one manually applied file led ArgoCD to install everything else from GitHub |
+| 3 | The controller calls AWS with its own short-lived IRSA credentials; no keys anywhere. EKS injects `AWS_ROLE_ARN` and the token file because of the service account annotation |
+| 4 | The UI is reachable only through cluster credentials; the initial password no longer exists in the cluster |
+| 5 | Manual changes in the cluster do not survive: Git is the source of truth |
+| 6 | The only way to change the cluster is a commit, which is reviewed and recorded in Git history |
+
+The first real load balancer is created by the application's Ingress on Day 5 (end-to-end test of the controller).
+
+**Notes**
+- A plain `helm list -A` shows only `argocd`. The controller is rendered and applied by ArgoCD, so it appears as an
+  ArgoCD Application, not as a Helm release.
+- `git revert <commit> && git push` undoes a change the same way: through Git.
 
 | Setting | Why |
 |---|---|
@@ -705,10 +742,55 @@ kubectl get ingressclass                                             # alb
 | AppProject `platform` | Add-ons may only come from this repository and listed chart repositories |
 | Root app has no finalizer | Deleting `root` by mistake does not delete the whole platform |
 | `prune` + `selfHeal` | Removing a file removes the component; manual cluster edits are reverted |
+| Load balancer controller stays in `kube-system` | Matches the AWS documentation and the IRSA trust (`kube-system:aws-load-balancer-controller`). Moving it would need the Terraform trust changed first, then the Git change |
 | Load balancer controller `vpcTags: Name=platform-dev` | Pods cannot read instance metadata (hop limit 1), so the VPC is found by its tag, not by asking the node |
 | `enableServiceMutatorWebhook: false` | The controller handles Ingresses only and does not take over other Services |
 | Chart versions pinned (ArgoCD 10.10.1, controller 3.6.0) | Upgrades are reviewed one-line changes |
 | ArgoCD chart pulled from `oci://ghcr.io/argoproj/argo-helm` | The https chart repository serves files from GitHub release assets, which timed out on this network; the OCI copy is the same chart (digest `sha256:1320fc2d…`) |
+
+---
+
+## 10c. Step 8: Platform Add-ons (Day 4)
+
+Three add-ons, all installed by ArgoCD from `gitops/platform/`. Only Karpenter needs AWS resources first.
+
+| Add-on | Job | AWS side |
+|---|---|---|
+| Karpenter | Launches and removes **Spot** nodes for application pods, picks instance types per workload, consolidates underused nodes | Terraform (below) |
+| External Secrets Operator | Copies Secrets Manager secrets into Kubernetes Secrets | IRSA role from Day 2 |
+| Default-deny network policies | Pods may only talk to what is explicitly allowed | None (VPC CNI network policy agent, Day 2) |
+
+### Karpenter: AWS resources (Terraform)
+Code: `module "karpenter"` and the `eks-pod-identity-agent` add-on in `terraform/modules/eks/main.tf`.
+
+| Created | Name | Purpose |
+|---|---|---|
+| EKS add-on | `eks-pod-identity-agent` | Gives pods AWS credentials through EKS Pod Identity |
+| Controller IAM role + Pod Identity association | `platform-dev-karpenter` ↔ `kube-system/karpenter` | Lets the controller launch/terminate EC2 instances, read pricing and SSM AMI parameters |
+| Node IAM role + instance profile | `platform-dev-karpenter-node` | Identity of the nodes Karpenter launches (join the cluster, pull from ECR, SSM access) |
+| EKS access entry (type EC2_LINUX) | for the node role | Lets those nodes register with the cluster (authentication mode `API`) |
+| SQS queue + EventBridge rules | `platform-dev-karpenter` | Spot interruption warnings (~2 min), rebalance recommendations, instance state changes: Karpenter drains the node in time |
+
+**Pod Identity instead of IRSA for Karpenter.** The Karpenter sub-module of the EKS module (v21) supports only
+EKS Pod Identity. It is AWS's newer mechanism with the same result: short-lived credentials for one service
+account, no keys. The difference: the link "service account → role" is an EKS API object (Pod Identity
+association) instead of an OIDC trust condition in the role. Other workloads keep IRSA.
+
+```bash
+cd ~/workspace/Task/aws-platform/terraform/environments/dev
+
+# One time per account: Spot needs its service-linked role (an error "has been taken" means it already exists)
+aws iam create-service-linked-role --aws-service-name spot.amazonaws.com || true
+
+terraform init                     # the karpenter sub-module is new
+terraform plan -out=tfplan         # expect only additions: ~15 to add, 0 to change, 0 to destroy
+terraform apply tfplan
+terraform output karpenter         # controller role, node role name, queue name (used in the Helm values)
+
+# Check
+aws eks list-pod-identity-associations --cluster-name platform-dev --output table
+kubectl get pods -n kube-system -l app.kubernetes.io/name=eks-pod-identity-agent    # one per node, Running
+```
 
 ---
 
@@ -731,8 +813,9 @@ Tick each item as it is done.
 
 **Day 3: Dev environment and GitOps**
 - [x] `kubectl` connected to the Dev cluster
-- [ ] ArgoCD installed, app-of-apps structure in place
-- [ ] AWS Load Balancer Controller, certificate, DNS record and HTTPS ingress
+- [x] ArgoCD installed (Helm, chart 10.10.1), app-of-apps structure in place (`root` → `platform/`)
+- [x] AWS Load Balancer Controller (chart 3.6.0, IRSA), deployed by ArgoCD
+- [ ] ~~Certificate, DNS record and HTTPS ingress~~ not in this build: no domain, the app uses the ALB address over HTTP (Day 5)
 
 **Day 4: Platform add-ons**
 - [ ] Karpenter
@@ -758,6 +841,11 @@ Tick each item as it is done.
 |---|---|---|
 | Region `us-east-1` | `ap-south-1` | Closer to the team; the code takes the region as a setting |
 | SSO for local access | Temporary IAM user access keys | SSO not set up on the account; keys are deleted after the local build (see Step 2) |
+| HTTPS with ACM certificate and Route53 record | HTTP on the load balancer's own address | No domain available; HTTPS can be added later with an ACM certificate and two Ingress annotations |
+| ArgoCD UI | Port-forward only (ingress prepared, commented) | Nothing exposed; a VPN-based URL can be enabled later |
+| IRSA for every workload | IRSA everywhere except Karpenter, which uses EKS Pod Identity | The Karpenter sub-module of the EKS module (v21) supports only Pod Identity; same security result (short-lived, per service account) |
+| VPC interface endpoints for ECR, STS, Secrets Manager | Off in Dev (`enable_interface_endpoints = false`); S3 gateway endpoint kept | POC cost (~$3/day); traffic goes through NAT, still TLS. One setting turns them back on |
+| Dev runs continuously | Stopped and started on demand (`scripts/platform-stop.sh`, `platform-start.sh`) | POC cost; everything in the cluster is rebuilt from Git |
 
 ---
 
@@ -782,18 +870,75 @@ Tick each item as it is done.
 
 ## 13. Cost and Clean-up
 
-Resources cost money **only while they exist**. Rough Dev cost while running (ap-south-1):
+This is a POC: Dev runs only while it is being used. Resources cost money **only while they exist**.
 
-| Item | Approx. cost |
+### Running cost (ap-south-1, approx.)
+
+| Item | Approx. cost | POC setting |
+|---|---|---|
+| EKS control plane | ~$2.40 / day | Cannot be paused, only deleted |
+| NAT Gateway (1 shared) | ~$1.10 / day + data | Cannot be paused, only deleted |
+| VPC interface endpoints (4 × 3 AZs) | ~$3 / day | **Off** (`enable_interface_endpoints = false`) |
+| System nodes (2 × t3.medium, On-Demand) | ~$2.20 / day | |
+| App nodes (Karpenter, Spot, from Day 4) | ~$1–2 / day | Only while app pods need them |
+| Load balancer (from Day 5) | ~$0.55 / day | |
+| State bucket, bootstrap KMS key | a few cents / day | Kept when stopped |
+
+**Running: about $6–8 per day. Stopped: a few cents per day.**
+
+### Stop and start on demand
+Everything inside the cluster comes back from Git, so stopping means deleting the Dev environment and
+starting means rebuilding it from code.
+
+```bash
+cd ~/workspace/Task/aws-platform
+export AWS_PROFILE=task AWS_REGION=ap-south-1
+
+bash scripts/platform-status.sh     # running or stopped? what is costing money? (read-only)
+bash scripts/platform-stop.sh       # ~15–20 min, asks twice before deleting anything
+bash scripts/platform-start.sh      # ~25–30 min, shows the Terraform plan and asks before applying
+```
+
+| Script | What it does, in order |
 |---|---|
-| EKS control plane | ~$2.40 / day |
-| NAT Gateway (1 shared) | ~$1.10 / day + data |
-| VPC interface endpoints (4 × 3 AZs) | ~$3 / day |
-| System nodes (2 × t3.medium, On-Demand) | ~$2.20 / day |
-| App nodes (Karpenter, Spot, from Day 4) | ~$1–2 / day |
-| Load balancer | ~$0.55 / day |
-| State bucket, KMS key | a few cents / day (KMS key ~$1 / month) |
+| `platform-stop.sh` | 1. Checks the AWS account; you type `stop`. 2. Deletes the ArgoCD root app (so nothing is re-created), then the other applications: the load balancer controller removes ALBs for deleted Ingresses, Karpenter removes its nodes. 3. Waits until no ALBs or Karpenter nodes remain (they are not in Terraform and would block the VPC deletion). 4. Uninstalls ArgoCD. 5. `terraform plan -destroy`, you type `yes`, destroy. Removes the EKS log group if EKS re-created it |
+| `platform-start.sh` | 1. Checks the account and that your public IP is in `admin_cidrs`. 2. `terraform plan`, you type `yes`, apply. 3. Connects kubectl, waits for the nodes. 4. Installs ArgoCD (Helm), applies `root-app.yaml`, waits until every application is Synced/Healthy |
+| `platform-status.sh` | Lists the EKS cluster, nodes, NAT Gateways, interface endpoints, load balancers and Elastic IPs, and says RUNNING or STOPPED |
 
-When you are not using Dev for a while, it can be destroyed with Terraform and rebuilt later from the same
-code. The bootstrap stack (state bucket) is kept, because it is protected and costs almost nothing.
-Teardown steps are added once the environment exists.
+**Kept when stopped:** bootstrap stack (state bucket, KMS key, GitHub OIDC, pipeline roles), the Terraform
+state (now empty for Dev), and everything in Git.
+
+**Lost when stopped, restore after a start:**
+
+| Item | Restore |
+|---|---|
+| Secret values in Secrets Manager | `aws secretsmanager put-secret-value ...` (the start script prints the command) |
+| Images in ECR | Re-run the `my-app` release pipeline (Day 6) or push the image again |
+| ArgoCD admin password | New initial password; change it again |
+| KMS keys (EKS secrets, app secrets) | New keys are created; the old ones are scheduled for deletion (no charge while pending) |
+
+Dev-only settings that make this possible: `secret_recovery_window_days = 0` (secrets can be re-created at once)
+and `ecr_force_delete = true` (the registry can be deleted with images in it). Staging and Production keep the
+safe defaults.
+
+### Trade-off of turning off the interface endpoints
+Without them, pulls from ECR, IRSA logins (STS) and secret reads go through the NAT Gateway: still encrypted
+(TLS), but over the internet path instead of the private AWS network, and billed as NAT data (cents per GB).
+For the design's private-endpoint setup set `enable_interface_endpoints = true` (Staging/Production default).
+
+### Budget alert (recommended)
+An email when the month's spend passes a limit, in case the environment is forgotten:
+```bash
+aws budgets create-budget --account-id 471112815218 \
+  --budget '{"BudgetName":"aws-platform-poc","BudgetLimit":{"Amount":"50","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' \
+  --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"<your-email>"}]}]'
+```
+
+### Troubleshooting a stop or start
+
+| Problem | Fix |
+|---|---|
+| Destroy hangs on the VPC, subnets or a security group | Something created by the cluster still exists: run `platform-status.sh`; delete leftover load balancers (EC2 → Load Balancers) or `k8s-*` security groups, then run the stop script again |
+| Start fails: log group `/aws/eks/platform-dev/cluster` already exists | `aws logs delete-log-group --log-group-name /aws/eks/platform-dev/cluster`, then start again |
+| Start stops at "Your IP ... is not in admin_cidrs" | Put the printed IP in `terraform.tfvars` and run again |
+| An application stays OutOfSync after a start | `kubectl describe application <name> -n argocd`; usually a missing secret value or image |

@@ -60,6 +60,10 @@ module "eks" {
     }
     kube-proxy = {}
     coredns    = {}
+    # EKS Pod Identity: how Karpenter's controller gets its AWS credentials (see module "karpenter" below)
+    eks-pod-identity-agent = {
+      before_compute = true
+    }
   }
 
   eks_managed_node_groups = {
@@ -113,4 +117,31 @@ module "eks" {
   node_security_group_tags = {
     "karpenter.sh/discovery" = var.name
   }
+}
+
+# AWS side of Karpenter (the controller itself is installed by ArgoCD):
+# - controller IAM role, linked to the service account kube-system/karpenter with EKS Pod Identity
+#   (this module version supports Pod Identity only; it is AWS's newer alternative to IRSA)
+# - node IAM role + instance profile + EKS access entry, so nodes Karpenter launches can join the cluster
+# - SQS queue + EventBridge rules: AWS warns ~2 minutes before reclaiming a Spot instance, and Karpenter
+#   moves the pods off that node in time
+module "karpenter" {
+  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
+  version = "~> 21.0"
+
+  cluster_name = module.eks.cluster_name
+
+  namespace       = "kube-system"
+  service_account = "karpenter"
+
+  iam_role_name            = "${var.name}-karpenter"
+  iam_role_use_name_prefix = false
+
+  node_iam_role_name            = "${var.name}-karpenter-node"
+  node_iam_role_use_name_prefix = false
+  node_iam_role_additional_policies = {
+    ssm = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" # Session Manager access, no SSH
+  }
+
+  queue_name = "${var.name}-karpenter"
 }

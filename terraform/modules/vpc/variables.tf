@@ -20,6 +20,12 @@ variable "single_nat_gateway" {
   default     = false
 }
 
+variable "enable_interface_endpoints" {
+  description = "Create the paid interface endpoints (ECR API/DKR, STS, Secrets Manager). The free S3 gateway endpoint is always created"
+  type        = bool
+  default     = true
+}
+
 variable "cluster_name" {
   description = "EKS cluster name; used for the subnet tags the load balancer controller and Karpenter look for"
   type        = string

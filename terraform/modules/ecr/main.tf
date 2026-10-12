@@ -16,6 +16,12 @@ variable "name" {
   type        = string
 }
 
+variable "force_delete" {
+  description = "Delete the repository on destroy even if it contains images (Dev/POC only)"
+  type        = bool
+  default     = false
+}
+
 variable "keep_images" {
   description = "How many tagged images to keep"
   type        = number
@@ -23,7 +29,8 @@ variable "keep_images" {
 }
 
 resource "aws_ecr_repository" "this" {
-  name = var.name
+  name         = var.name
+  force_delete = var.force_delete
 
   # A tag (the commit SHA) can never be overwritten: what was scanned and approved is what runs
   image_tag_mutability = "IMMUTABLE"

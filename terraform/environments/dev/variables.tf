@@ -19,6 +19,15 @@ variable "log_retention_days" {
   type = number
 }
 
+variable "enable_interface_endpoints" {
+  type = bool
+}
+
+variable "ecr_force_delete" {
+  description = "Allow terraform destroy to delete the ECR repository even if it still holds images"
+  type        = bool
+}
+
 # ---- cluster
 variable "kubernetes_version" {
   type = string
