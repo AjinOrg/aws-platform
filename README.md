@@ -1209,7 +1209,9 @@ shred -u "$KEY" 2>/dev/null || rm -f "$KEY"
 ```
 The app can write only to `aws-platform`, and only contents and pull requests; its tokens live 1 hour.
 
-### Setup 2: SonarQube Cloud
+### Setup 2: SonarQube Cloud (Phase 2)
+Not set up in Phase 1. The pipeline job "Code quality (SonarQube Cloud)" already exists: without the `SONAR_TOKEN`
+secret it shows a warning and passes, so it does not block anything. To enable it later:
 1. https://sonarcloud.io → *Log in with GitHub* → *Import an organization* → `AjinOrg` (installs the SonarQube Cloud
    app; select `my-app`) → organization key `ajinorg`, **free plan** (public repositories).
 2. *Analyze new project* → `my-app` → method **GitHub Actions** → copy the token:
@@ -1304,8 +1306,8 @@ Tick each item as it is done.
 - [x] Kyverno CLI check in `my-app` (6 policies against the platform chart with the new image)
 - [x] Fixed image `1e0f51f` (OpenSSL CVEs) deployed to dev, staging, production; `platform-ci` green
 - [ ] Rulesets (branch protection) on both repositories
-- [ ] GitHub App: automatic dev deployment PRs; staging/production released on purpose (release.yaml / scripts/release.sh)
-- [ ] SonarQube Cloud quality gate in the my-app pipeline
+- [x] GitHub App: automatic dev deployment PRs; staging/production released on purpose (release.yaml / scripts/release.sh)
+- [ ] Phase 2: SonarQube Cloud quality gate (pipeline job ready; skipped with a warning until the `SONAR_TOKEN` secret exists)
 - [ ] Optional: NVD API key (full OWASP Dependency-Check)
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
