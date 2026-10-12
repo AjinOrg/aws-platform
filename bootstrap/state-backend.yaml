@@ -30,9 +30,30 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: Set to false if the account already has the GitHub OIDC provider (only one is allowed)
+  # GitHub "immutable subject": the OIDC sub claim contains owner and repository IDs, e.g.
+  #   repo:AjinOrg@339973007/my-app@1411604810:ref:refs/heads/main
+  # IDs never change or get reused, so a deleted-and-recreated repository with the same name cannot match.
+  # Check a repository with: gh api repos/<owner>/<repo>/actions/oidc/customization/sub  (sub_claim_prefix)
+  # Leave the three IDs empty for the classic format repo:<owner>/<repo>:...
+  GitHubOrgId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric ID of the GitHub owner (empty = classic subject format)
+  AppRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric ID of the app repository
+  PlatformRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric ID of the platform repository
 
 Conditions:
   CreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+  ImmutableSubject: !Not [!Equals [!Ref GitHubOrgId, ""]]
 
 Resources:
   # ---------------------------------------------------------------- state storage
@@ -144,7 +165,12 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/main"
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "${Repo}:ref:refs/heads/main"
+                  - Repo: !If
+                      - ImmutableSubject
+                      - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${AppRepo}@${AppRepoId}"
+                      - !Sub "repo:${GitHubOrg}/${AppRepo}"
       Policies:
         - PolicyName: ecr-push
           PolicyDocument:
@@ -183,8 +209,18 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${GitHubOrg}/${PlatformRepo}:pull_request"
-                  - !Sub "repo:${GitHubOrg}/${PlatformRepo}:ref:refs/heads/main"
+                  - !Sub
+                    - "${Repo}:pull_request"
+                    - Repo: !If
+                        - ImmutableSubject
+                        - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${PlatformRepo}@${PlatformRepoId}"
+                        - !Sub "repo:${GitHubOrg}/${PlatformRepo}"
+                  - !Sub
+                    - "${Repo}:ref:refs/heads/main"
+                    - Repo: !If
+                        - ImmutableSubject
+                        - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${PlatformRepo}@${PlatformRepoId}"
+                        - !Sub "repo:${GitHubOrg}/${PlatformRepo}"
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess"
         - !Ref StateAccessPolicy
@@ -205,7 +241,12 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${PlatformRepo}:environment:${ApplyEnvironment}"
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "${Repo}:environment:${ApplyEnvironment}"
+                  - Repo: !If
+                      - ImmutableSubject
+                      - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${PlatformRepo}@${PlatformRepoId}"
+                      - !Sub "repo:${GitHubOrg}/${PlatformRepo}"
       # Terraform creates VPCs, EKS, IAM roles, KMS keys... so it needs broad rights.
       # The protection is the trust policy above: only an approved job in one environment can assume it.
       ManagedPolicyArns:

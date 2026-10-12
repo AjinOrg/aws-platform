@@ -91,7 +91,7 @@ The values used by this build. None of them are secrets.
 | AWS account | `471112815218` | |
 | AWS region | `ap-south-1` (Mumbai) | The design document uses `us-east-1` as an example; this build uses Mumbai |
 | Local AWS profile | `task` | IAM user access keys, temporary for the local build (see [Step 2](#6-step-2-connect-to-aws)) |
-| GitHub owner | `AjinOrg` (organization, created under the personal account `AjinUrolime`) | Repositories: `AjinOrg/aws-platform`, `AjinOrg/my-app` |
+| GitHub owner | `AjinOrg` (organization, id `339973007`, created under the personal account `AjinUrolime`); repository ids: `aws-platform` `1411566444`, `my-app` `1411604810` (used in the OIDC trust, see Step 4) | Repositories: `AjinOrg/aws-platform`, `AjinOrg/my-app` |
 | Bootstrap stack | `aws-platform-bootstrap` | Termination protection on |
 | Terraform state bucket | `aws-platform-tfstate-471112815218` | State path per environment: `aws-platform/<env>/terraform.tfstate` |
 | State KMS key | `alias/aws-platform-tfstate` | |
@@ -374,6 +374,7 @@ aws cloudformation deploy \
   --parameter-overrides \
       StateBucketName=aws-platform-tfstate-471112815218 \
       GitHubOrg=AjinOrg \
+      GitHubOrgId=339973007 AppRepoId=1411604810 PlatformRepoId=1411566444 \
   --capabilities CAPABILITY_NAMED_IAM
 
 # 3. Protect the stack from accidental deletion
@@ -404,15 +405,26 @@ Only the three roles' trust policies change:
 # Preview: create a change set without executing it
 aws cloudformation deploy --template-file bootstrap/state-backend.yaml --stack-name aws-platform-bootstrap \
   --parameter-overrides StateBucketName=aws-platform-tfstate-471112815218 GitHubOrg=AjinOrg \
+      GitHubOrgId=339973007 AppRepoId=1411604810 PlatformRepoId=1411566444 \
   --capabilities CAPABILITY_NAMED_IAM --no-execute-changeset
-aws cloudformation list-change-sets --stack-name aws-platform-bootstrap --query "Summaries[0].ChangeSetName" --output text
-aws cloudformation describe-change-set --stack-name aws-platform-bootstrap --change-set-name <name-from-above> \
+# Newest change set (not Summaries[0]: an old FAILED one may still be listed first)
+CS=$(aws cloudformation list-change-sets --stack-name aws-platform-bootstrap \
+       --query "sort_by(Summaries,&CreationTime)[-1].ChangeSetName" --output text); echo "CS=[$CS]"
+aws cloudformation describe-change-set --stack-name aws-platform-bootstrap --change-set-name "$CS" \
+  --query "[Status,StatusReason]" --output text          # CREATE_COMPLETE
+aws cloudformation describe-change-set --stack-name aws-platform-bootstrap --change-set-name "$CS" \
   --query "Changes[].ResourceChange.[Action,LogicalResourceId,Replacement]" --output table
 # expect: Modify EcrPushRole / TerraformPlanRole / TerraformApplyRole, Replacement False
 
 # Apply
-aws cloudformation execute-change-set --stack-name aws-platform-bootstrap --change-set-name <name-from-above>
+aws cloudformation execute-change-set --stack-name aws-platform-bootstrap --change-set-name "$CS"
 aws cloudformation wait stack-update-complete --stack-name aws-platform-bootstrap
+
+# Leftovers: a deploy with no differences leaves a FAILED change set ("didn't contain changes"). Remove them:
+for cs in $(aws cloudformation list-change-sets --stack-name aws-platform-bootstrap \
+             --query "Summaries[?Status=='FAILED'].ChangeSetName" --output text); do
+  aws cloudformation delete-change-set --stack-name aws-platform-bootstrap --change-set-name "$cs"
+done
 
 # Check
 aws iam get-role --role-name aws-platform-ecr-push \
@@ -436,13 +448,42 @@ shared policy **`aws-platform-tfstate-access`** (read/write the state files and 
 environment the job runs in. AWS gives temporary credentials (1 hour) only if that matches the role's trust
 condition. No AWS keys are stored in GitHub.
 
-| Role | Trusted only for | Can do |
+| Role | Trusted only for (`sub` claim) | Can do |
 |---|---|---|
-| `aws-platform-ecr-push` | `AjinOrg/my-app`, `main` branch | Push and read images in the `my-app` ECR repository; nothing else |
-| `aws-platform-terraform-plan` | `AjinOrg/aws-platform`, pull requests and `main` | Read-only on the account (`ReadOnlyAccess`) plus the state files; cannot change infrastructure |
-| `aws-platform-terraform-apply` | `AjinOrg/aws-platform`, GitHub Environment `terraform-apply` | Administrator; reachable only by a job a reviewer has approved |
+| `aws-platform-ecr-push` | `repo:AjinOrg@339973007/my-app@1411604810:ref:refs/heads/main` | Push and read images in the `my-app` ECR repository; nothing else |
+| `aws-platform-terraform-plan` | `repo:AjinOrg@339973007/aws-platform@1411566444:pull_request` and `...:ref:refs/heads/main` | Read-only on the account (`ReadOnlyAccess`) plus the state files; cannot change infrastructure |
+| `aws-platform-terraform-apply` | `repo:AjinOrg@339973007/aws-platform@1411566444:environment:terraform-apply` | Administrator; reachable only by a job a reviewer has approved |
 
-Until Day 8 these roles are unused: Terraform runs from your computer with your own credentials.
+The ECR push role is in use since Day 6 (my-app pipeline). The two Terraform roles are used from Day 8: until
+then Terraform runs from your computer with your own credentials.
+
+### GitHub's immutable OIDC subject (owner and repository IDs)
+The repositories use GitHub's **immutable subject** format: the `sub` claim contains the numeric IDs of the
+owner and the repository, not only their names.
+
+| | `sub` claim |
+|---|---|
+| Classic | `repo:AjinOrg/my-app:ref:refs/heads/main` |
+| Immutable (used here) | `repo:AjinOrg@339973007/my-app@1411604810:ref:refs/heads/main` |
+
+**Why it is safer:** names can be reused, IDs cannot. If a repository were deleted and someone recreated one
+with the same name, a classic trust policy would accept *their* tokens; with IDs only this exact repository matches.
+
+| ID | Value | Find it with |
+|---|---|---|
+| Owner `AjinOrg` | `339973007` | `gh api orgs/AjinOrg --jq .id` |
+| `my-app` | `1411604810` | `gh api repos/AjinOrg/my-app --jq .id` |
+| `aws-platform` | `1411566444` | `gh api repos/AjinOrg/aws-platform --jq .id` |
+| Format in use | `use_immutable_subject: true` | `gh api repos/AjinOrg/<repo>/actions/oidc/customization/sub` (`sub_claim_prefix`) |
+
+The template supports both formats: with `GitHubOrgId`, `AppRepoId`, `PlatformRepoId` set it builds the immutable
+subject; left empty, the classic one.
+
+**Symptom of a mismatch:** the pipeline fails at "AWS credentials" with
+`Not authorized to perform sts:AssumeRoleWithWebIdentity`. Compare the role's condition
+(`aws iam get-role --role-name <role> --query Role.AssumeRolePolicyDocument`) with the repository's `sub_claim_prefix`.
+This happened in this build: the roles had the classic format, GitHub sent the immutable one; fixed by the
+template parameters above.
 
 ### Verify the state bucket
 ```bash
@@ -1131,9 +1172,13 @@ Tick each item as it is done.
 - [x] App deployed to the dev, staging and production namespaces behind one shared ALB (`/dev`, `/staging`, `/production`)
 
 **Day 6: CI pipelines**
-- [ ] `my-app` pull request checks: Gitleaks, lint, tests, OWASP, Trivy
-- [ ] `aws-platform` checks: Gitleaks, Helm lint, kubeconform, Checkov
-- [ ] Kyverno CLI check in `my-app`
+- [x] `my-app` pipeline: Gitleaks, lint, tests, npm audit + OWASP Dependency-Check (runs once the `NVD_API_KEY` secret is set), Trivy fs + image
+- [x] `my-app` publishes the image to ECR with GitHub OIDC (immutable subject), no stored keys: `1e0f51f`
+- [x] `aws-platform` checks: Gitleaks, Terraform fmt/validate, Helm lint, kubeconform, Kyverno, Checkov
+- [x] Kyverno CLI check in `my-app` (6 policies against the platform chart with the new image)
+- [ ] Fixed image `1e0f51f` (OpenSSL CVEs) deployed to dev, staging, production
+- [ ] Branch protection on both repositories
+- [ ] Optional: NVD API key, GitHub App for automatic deployment pull requests
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
 > by running Terraform from your computer. From Day 8 onwards, every infrastructure change goes through the pipeline.
