@@ -2,6 +2,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: my-app
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "my-app.labels" . | nindent 4 }}
 spec:

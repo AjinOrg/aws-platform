@@ -1,0 +1,38 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow the latest tag
+    policies.kyverno.io/description: >-
+      Images must have an explicit, immutable tag (the commit SHA). ":latest" or no tag means nobody knows
+      which code is running, and rollbacks are impossible.
+spec:
+  background: true
+  rules:
+    - name: require-tag
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "An explicit image tag is required."
+        pattern:
+          spec:
+            containers:
+              - image: "*:*"
+    - name: no-latest
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "The ':latest' tag is not allowed; use the commit SHA."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"

@@ -1,0 +1,28 @@
+# DEMO: deliberately non-compliant. Expected result: REJECTED (no resource requests or limits).
+# Try: kyverno apply policies/kyverno --resource demo/bad-no-limits.yaml      (CI check)
+#      kubectl apply -f demo/bad-no-limits.yaml                               (cluster, once policies are enforced)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-no-limits
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bad-no-limits }
+  template:
+    metadata:
+      labels: { app: bad-no-limits }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app:20f4799
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /readyz, port: 8080 }, periodSeconds: 5 }

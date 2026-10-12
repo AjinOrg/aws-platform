@@ -1,0 +1,12 @@
+# Reviewers GitHub requires (with branch protection "Require review from Code Owners").
+# Later patterns win. Replace @AjinUrolime with a team (e.g. @AjinOrg/platform) when there is one.
+*                                            @AjinUrolime
+
+# Production deployments: a person approves every image that reaches production
+/gitops/apps/my-app/values-production.yaml   @AjinUrolime
+
+# Infrastructure, guardrails and pipelines
+/terraform/                                  @AjinUrolime
+/bootstrap/                                  @AjinUrolime
+/policies/                                   @AjinUrolime
+/.github/                                    @AjinUrolime

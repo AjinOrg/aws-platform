@@ -1,0 +1,27 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-probes
+  annotations:
+    policies.kyverno.io/title: Require liveness and readiness probes
+    policies.kyverno.io/description: >-
+      Without probes Kubernetes sends traffic to pods that are not ready and never restarts a hung process.
+spec:
+  background: true
+  rules:
+    - name: liveness-and-readiness
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "Every container needs a livenessProbe and a readinessProbe."
+        pattern:
+          spec:
+            containers:
+              - livenessProbe:
+                  periodSeconds: ">0"
+                readinessProbe:
+                  periodSeconds: ">0"

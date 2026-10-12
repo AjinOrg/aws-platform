@@ -21,6 +21,7 @@ repository, **`my-app`**.
     - [Step 7: ArgoCD, App-of-Apps and the Load Balancer Controller (Day 3)](#10b-step-7-argocd-app-of-apps-and-the-load-balancer-controller-day-3)
     - [Step 8: Platform Add-ons (Day 4)](#10c-step-8-platform-add-ons-day-4)
     - [Step 9: The Application (Day 5)](#10d-step-9-the-application-day-5)
+    - [Step 10: CI Pipelines (Day 6)](#10e-step-10-ci-pipelines-day-6)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -39,9 +40,9 @@ Folders are added step by step as the build progresses.
 | `terraform/environments/` | Settings for each environment: `dev`, `staging`, `production` | Days 1–3 |
 | `gitops/` | What ArgoCD installs: platform add-ons and the app's settings per environment | Days 3–5 |
 | `helm/my-app/` | How the application is packaged for Kubernetes | Day 5 |
-| `policies/kyverno/` | Security rules the cluster enforces | Day 8 |
+| `policies/kyverno/` | Security rules: checked in CI now, enforced in the cluster from Day 8 | Days 6, 8 |
 | `monitoring/` | Alert rules and dashboards | Day 9 |
-| `demo/` | Deliberately bad files for the demo, and the load test | Day 8 |
+| `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
 | `.github/workflows/` | Pipelines: platform checks and Terraform | Days 6, 8 |
 | `docs/` | How-it-works guides (now: Karpenter and External Secrets); later architecture, decisions, runbook | Days 4, 10 |
 
@@ -982,6 +983,119 @@ curl -s http://$ALB/dev; echo; curl -s http://$ALB/staging; echo; curl -s http:/
 
 ---
 
+## 10e. Step 10: CI Pipelines (Day 6)
+
+Two pipelines, one per repository. Pull requests get **checks only** (no AWS access); `main` of `my-app`
+additionally **publishes** the image and proposes the deployment.
+
+```
+my-app  (.github/workflows/pipeline.yaml)
+  PR / push main ─┬─ Gitleaks (full history)
+                  ├─ Lint + unit tests (Node 22)
+                  ├─ npm audit + OWASP Dependency-Check (CVSS ≥ 7 fails; needs secret NVD_API_KEY)
+                  └─ Trivy filesystem (vulnerabilities, secrets, Dockerfile misconfigurations)
+                           │ all green
+                           ▼
+                  Build image (tag = 7-char commit SHA) → Trivy image (HIGH/CRITICAL with a fix fail)
+                  → Kyverno: platform policies applied to the platform's chart with THIS image
+                           │ main only
+                           ▼
+                  GitHub OIDC → role aws-platform-ecr-push (1 h) → push to ECR (skipped if the tag exists)
+                  → GitHub App token → pull request in aws-platform: values-dev.yaml image.tag = <sha>
+
+aws-platform  (.github/workflows/platform-ci.yaml)
+  PR / push main ─┬─ Gitleaks (full history)
+                  ├─ Terraform fmt + validate (every environment)
+                  ├─ Helm lint + render 3 envs + kubeconform (all manifests, CRD schemas)
+                  │   + Kyverno: chart must pass, every demo/bad-*.yaml must be rejected
+                  └─ Checkov (Terraform, CloudFormation, rendered chart; skips with reasons in .checkov.yaml)
+```
+
+### New files
+
+| Repository | File | Purpose |
+|---|---|---|
+| both | `.github/scripts/install-ci-tools.sh` | Installs **pinned** Gitleaks 8.30.1, Trivy 0.75.0, kubeconform 0.8.0, Kyverno CLI 1.19.1; every download checked against the official SHA256 file |
+| aws-platform | `.github/workflows/platform-ci.yaml` | Platform checks (above) |
+| aws-platform | `.checkov.yaml` | Checkov frameworks + 8 skipped checks, each with its reason |
+| aws-platform | `.github/CODEOWNERS` | Required reviewer for production values, Terraform, bootstrap, policies, pipelines |
+| aws-platform | `policies/kyverno/*.yaml` | 6 policies, `Enforce`, for namespaces dev/staging/production (below) |
+| aws-platform | `demo/bad-*.yaml` | 4 deliberately non-compliant Deployments: each must be rejected |
+| my-app | `.github/workflows/pipeline.yaml` | Application pipeline (above) |
+
+### Kyverno policies
+
+| Policy | Rejects |
+|---|---|
+| `disallow-privileged-containers` | `securityContext.privileged: true` |
+| `require-run-as-non-root` | Pods/containers without `runAsNonRoot: true` |
+| `restrict-image-registries` | Images not from `471112815218.dkr.ecr.ap-south-1.amazonaws.com` |
+| `require-requests-limits` | Containers without CPU/memory requests or a memory limit (CPU limits deliberately not required) |
+| `disallow-latest-tag` | `:latest` or no tag |
+| `require-probes` | Containers without liveness and readiness probes |
+
+Used today by the **CI** (Kyverno CLI). Installing Kyverno in the cluster to enforce them at admission is the
+next step (Day 8 in the plan); the files are already in the format the cluster needs.
+
+### Checked before pushing (locally, same versions as CI)
+
+| Check | Result |
+|---|---|
+| `install-ci-tools.sh` | All 4 downloads: checksum OK |
+| actionlint (both workflows) | No problems |
+| Gitleaks (aws-platform history) | No leaks |
+| kubeconform: 48 resources (3 rendered envs + all gitops manifests) | 47 valid; `ClusterSecretStore` v1 has no public schema, so that kind alone is skipped |
+| Kyverno: chart in dev / staging / production | `pass: 7, fail: 0` each |
+| Kyverno: `bad-privileged`, `bad-root`, `bad-registry`, `bad-no-limits` | Each **rejected** by exactly its policy (exit code 1) |
+| Checkov | 0 failed (one real finding fixed: explicit KMS key policy in the secrets module) |
+| Trivy fs, npm audit (my-app) | Clean |
+| Trivy image | **First run failed**: 1 critical + 5 high OpenSSL CVEs in the Debian 12 distroless base (also in the running image `20f4799`). Fixed by moving to `gcr.io/distroless/nodejs22-debian13:nonroot`: now clean |
+
+### Checkov: accepted findings (`.checkov.yaml`)
+
+| Check | Why accepted |
+|---|---|
+| `CKV_TF_1` module commit hash | Registry modules pinned with `~>`; providers by the lock file |
+| `CKV_AWS_394` AZ pinning | First 3 AZs taken explicitly |
+| `CKV2_AWS_57` secret rotation | Rotated by owners (POC); needs a rotation Lambda |
+| `CKV_AWS_18` state bucket access logs | CloudTrail; extra log bucket not worth it for the POC |
+| `CKV_K8S_43` image digest | ECR tags are immutable |
+| `CKV_K8S_15` pull policy Always | Immutable tags make `IfNotPresent` safe |
+| `CKV_K8S_11` CPU limits | Deliberate: throttling; memory limits are enforced |
+| `CKV2_K8S_6` NetworkPolicy | Applied per namespace by the platform, not by the chart |
+
+### One-time GitHub settings
+```bash
+# Branch protection: main only through pull requests with green checks (free on public repositories)
+gh api -X PUT repos/AjinOrg/aws-platform/branches/main/protection --input - <<'EOF'
+{ "required_status_checks": { "strict": true, "contexts": [
+    "Secrets scan (Gitleaks)", "Terraform fmt + validate",
+    "Helm lint + kubeconform + Kyverno", "IaC security scan (Checkov)" ] },
+  "enforce_admins": false,
+  "required_pull_request_reviews": { "require_code_owner_reviews": true, "required_approving_review_count": 1 },
+  "restrictions": null }
+EOF
+gh api -X PUT repos/AjinOrg/my-app/branches/main/protection --input - <<'EOF'
+{ "required_status_checks": { "strict": true, "contexts": [
+    "Secrets scan (Gitleaks)", "Lint + unit tests",
+    "Dependencies (npm audit + OWASP Dependency-Check)", "Filesystem scan (Trivy)",
+    "Build image + Trivy + Kyverno (+ push on main)" ] },
+  "enforce_admins": false, "required_pull_request_reviews": null, "restrictions": null }
+EOF
+gh repo edit AjinOrg/aws-platform --enable-auto-merge --delete-branch-on-merge
+```
+- `enforce_admins: false`: with a single maintainer, the owner can still merge their own pull requests
+  (GitHub does not allow approving your own). Turn it on when there is a second reviewer.
+- **OWASP Dependency-Check** needs a free NVD API key (https://nvd.nist.gov/developers/request-an-api-key):
+  `gh secret set NVD_API_KEY -R AjinOrg/my-app`. Without it the job runs `npm audit` and shows a warning.
+- **Deployment pull requests** need a GitHub App (Settings → Developer settings → GitHub Apps → New): permissions
+  *Contents: Read and write*, *Pull requests: Read and write*; install it on `AjinOrg/aws-platform` only; generate a
+  private key. Then `gh variable set PLATFORM_APP_ID -R AjinOrg/my-app` and
+  `gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/my-app < key.pem`. Without it the pipeline still pushes the
+  image and writes the tag to set by hand in the run summary.
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -991,7 +1105,7 @@ Tick each item as it is done.
 - [x] AWS access working (Step 2: profile `task`, temporary IAM user keys)
 - [x] GitHub connected (Step 3: `gh` logged in as `AjinUrolime`, organization `AjinOrg` granted)
 - [x] `aws-platform` repository created on GitHub (`AjinOrg/aws-platform`, public)
-- [ ] `my-app` repository created on GitHub
+- [x] `my-app` repository created on GitHub (`AjinOrg/my-app`)
 - [x] CloudFormation bootstrap deployed and verified (state bucket, KMS key, GitHub OIDC, pipeline roles)
 - [x] VPC created with Terraform (3 AZs, NAT, endpoints, flow logs)
 
@@ -1007,14 +1121,14 @@ Tick each item as it is done.
 
 **Day 4: Platform add-ons**
 - [x] Karpenter AWS side (Terraform: roles, Pod Identity, interruption queue)
-- [ ] Karpenter controller, EC2NodeClass and NodePool (ArgoCD)
-- [ ] External Secrets Operator and ClusterSecretStore
-- [ ] Default-deny network policies
+- [x] Karpenter controller, EC2NodeClass and NodePool (ArgoCD); first Spot node launched by the my-app deploy
+- [x] External Secrets Operator and ClusterSecretStore (my-app secrets synced in all 3 namespaces)
+- [x] Default-deny network policies + Pod Security `restricted` on dev, staging, production
 
 **Day 5: Application deployment**
-- [ ] Sample app and Dockerfile (non-root, health endpoints)
-- [ ] Helm chart
-- [ ] App deployed to the dev, staging and production namespaces
+- [x] Sample app and Dockerfile (non-root, distroless, health endpoints): `AjinOrg/my-app`, image `20f4799`
+- [x] Helm chart `helm/my-app` + ApplicationSet (project `apps`), metrics-server add-on for the HPA
+- [x] App deployed to the dev, staging and production namespaces behind one shared ALB (`/dev`, `/staging`, `/production`)
 
 **Day 6: CI pipelines**
 - [ ] `my-app` pull request checks: Gitleaks, lint, tests, OWASP, Trivy

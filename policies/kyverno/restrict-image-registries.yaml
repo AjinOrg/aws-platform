@@ -1,0 +1,27 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/description: >-
+      Application images must come from the platform's ECR registry, where they were scanned on push and
+      can only arrive through the release pipeline.
+spec:
+  background: true
+  rules:
+    - name: only-platform-ecr
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "Images must come from 471112815218.dkr.ecr.ap-south-1.amazonaws.com."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "471112815218.dkr.ecr.ap-south-1.amazonaws.com/*"
+            containers:
+              - image: "471112815218.dkr.ecr.ap-south-1.amazonaws.com/*"

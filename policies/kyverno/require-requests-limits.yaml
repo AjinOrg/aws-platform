@@ -1,0 +1,30 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-requests-limits
+  annotations:
+    policies.kyverno.io/title: Require resource requests and memory limits
+    policies.kyverno.io/description: >-
+      CPU and memory requests let the scheduler and Karpenter size nodes correctly; a memory limit stops one pod
+      from exhausting a node. CPU limits are not required (they cause throttling without protecting others).
+spec:
+  background: true
+  rules:
+    - name: requests-and-memory-limit
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "Every container needs resources.requests.cpu, resources.requests.memory and resources.limits.memory."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"

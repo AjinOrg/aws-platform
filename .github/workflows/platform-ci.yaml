@@ -1,0 +1,109 @@
+# Platform checks: every pull request to main (and every push to main) must pass all jobs.
+# Nothing here touches AWS or the cluster: no credentials are needed or available.
+name: platform-ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: 1.16.5
+  HELM_VERSION: v4.3.0
+  CHECKOV_VERSION: 3.3.27
+
+jobs:
+  gitleaks:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scan the whole history, not only the last commit
+      - run: bash .github/scripts/install-ci-tools.sh gitleaks
+      - run: gitleaks git --redact --verbose .
+
+  terraform:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - run: terraform fmt -check -recursive terraform
+      - name: validate every environment
+        run: |
+          for env in terraform/environments/*/; do
+            echo "== $env"
+            terraform -chdir="$env" init -backend=false -input=false >/dev/null
+            terraform -chdir="$env" validate
+          done
+
+  manifests:
+    name: Helm lint + kubeconform + Kyverno
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - run: bash .github/scripts/install-ci-tools.sh kubeconform kyverno
+      - name: helm lint
+        run: helm lint helm/my-app --set image.tag=ci
+      - name: render the chart for every environment
+        run: |
+          mkdir -p rendered
+          for env in dev staging production; do
+            helm template my-app helm/my-app -n "$env" -f "gitops/apps/my-app/values-$env.yaml" > "rendered/$env.yaml"
+          done
+      - name: kubeconform (Kubernetes + CRD schemas)
+        # ClusterSecretStore v1 has no schema in the public CRD catalog yet; it is skipped (only that kind)
+        run: |
+          kubeconform -strict -summary -skip ClusterSecretStore \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/ gitops/platform/ gitops/platform-config/ gitops/apps/my-app.yaml gitops/bootstrap/root-app.yaml
+      - name: Kyverno policies accept the chart
+        run: |
+          for env in dev staging production; do
+            kyverno apply policies/kyverno --resource "rendered/$env.yaml"
+          done
+      - name: Kyverno policies reject every demo file
+        run: |
+          for f in demo/bad-*.yaml; do
+            if kyverno apply policies/kyverno --resource "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::was NOT rejected by the policies"; exit 1
+            fi
+            echo "rejected as expected: $f"
+          done
+
+  checkov:
+    name: IaC security scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet "checkov==${CHECKOV_VERSION}"
+      - name: render the chart
+        run: |
+          mkdir -p rendered
+          for env in dev staging production; do
+            helm template my-app helm/my-app -n "$env" -f "gitops/apps/my-app/values-$env.yaml" > "rendered/$env.yaml"
+          done
+      - name: checkov (skipped checks and reasons are in .checkov.yaml)
+        run: checkov --config-file .checkov.yaml -d terraform -d bootstrap -d rendered

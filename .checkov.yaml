@@ -1,0 +1,28 @@
+# Checkov settings for this repository (used locally and by .github/workflows/platform-ci.yaml).
+# Every skipped check has a reason. Anything not listed here fails the pull request.
+compact: true
+quiet: true
+framework:
+  - terraform
+  - cloudformation
+  - kubernetes
+skip-check:
+  # Terraform registry modules are pinned with "~> X.Y" and the provider by .terraform.lock.hcl;
+  # commit-hash pinning applies to git sources, which we do not use.
+  - CKV_TF_1
+  # We take the first 3 AZs explicitly (slice); a new AZ in the region does not change the list.
+  - CKV_AWS_394
+  # App secrets are rotated by their owners (POC). Automatic rotation needs a rotation Lambda per secret type.
+  - CKV2_AWS_57
+  # State bucket: access is audited with CloudTrail; separate S3 access logs would need another bucket (POC cost).
+  - CKV_AWS_18
+  # ECR tags are IMMUTABLE: a tag always means the same image, which gives the guarantee a digest gives.
+  - CKV_K8S_43
+  # With immutable tags, IfNotPresent can never run a stale image; Always only adds registry calls.
+  - CKV_K8S_15
+  # No CPU limits on purpose: requests are set (scheduling, Karpenter); CPU limits only cause throttling.
+  # Memory limits ARE required (Kyverno require-requests-limits).
+  - CKV_K8S_11
+  # NetworkPolicies are applied per namespace by the platform (gitops/platform-config/namespaces), not by the
+  # chart, so Checkov cannot see them in the rendered chart.
+  - CKV2_K8S_6

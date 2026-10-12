@@ -1,0 +1,31 @@
+# DEMO: deliberately non-compliant. Expected result: REJECTED (privileged container).
+# Try: kyverno apply policies/kyverno --resource demo/bad-privileged.yaml      (CI check)
+#      kubectl apply -f demo/bad-privileged.yaml                               (cluster, once policies are enforced)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-privileged
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bad-privileged }
+  template:
+    metadata:
+      labels: { app: bad-privileged }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app:20f4799
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /readyz, port: 8080 }, periodSeconds: 5 }
