@@ -42,7 +42,7 @@ Folders are added step by step as the build progresses.
 | `monitoring/` | Alert rules and dashboards | Day 9 |
 | `demo/` | Deliberately bad files for the demo, and the load test | Day 8 |
 | `.github/workflows/` | Pipelines: platform checks and Terraform | Days 6, 8 |
-| `docs/` | Architecture, decisions, trade-offs, runbook | Day 10 |
+| `docs/` | How-it-works guides (now: Karpenter and External Secrets); later architecture, decisions, runbook | Days 4, 10 |
 
 ### Terraform modules: ours and community
 
@@ -753,6 +753,9 @@ The first real load balancer is created by the application's Ingress on Day 5 (e
 ## 10c. Step 8: Platform Add-ons (Day 4)
 
 Three add-ons, all installed by ArgoCD from `gitops/platform/`. Only Karpenter needs AWS resources first.
+
+> **How Karpenter and External Secrets work** (diagrams, where they run, which file holds what, read-only
+> checks): [docs/karpenter-and-external-secrets.md](docs/karpenter-and-external-secrets.md)
 
 | Add-on | Job | AWS side |
 |---|---|---|
