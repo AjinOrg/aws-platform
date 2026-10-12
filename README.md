@@ -1229,10 +1229,16 @@ single maintainer. The JSON files are in `.github/rulesets/`.
 cd ~/workspace/Task/aws-platform
 gh repo edit AjinOrg/aws-platform --enable-auto-merge --delete-branch-on-merge
 gh repo edit AjinOrg/my-app       --delete-branch-on-merge
-gh api -X POST repos/AjinOrg/aws-platform/rulesets --input .github/rulesets/aws-platform-main.json
-gh api -X POST repos/AjinOrg/my-app/rulesets       --input .github/rulesets/my-app-main.json
-gh api repos/AjinOrg/aws-platform/rulesets --jq '.[] | [.id,.name,.enforcement] | @tsv'
-gh api repos/AjinOrg/my-app/rulesets       --jq '.[] | [.id,.name,.enforcement] | @tsv'
+# Create the ruleset, or update it if it already exists (safe to re-run; the file is the source of truth)
+for r in aws-platform my-app; do
+  ID=$(gh api repos/AjinOrg/$r/rulesets --jq '.[] | select(.name=="main") | .id')
+  if [ -n "$ID" ]; then
+    gh api -X PUT  repos/AjinOrg/$r/rulesets/$ID --input .github/rulesets/$r-main.json --jq '"\(.id) \(.name) \(.enforcement) (updated)"'
+  else
+    gh api -X POST repos/AjinOrg/$r/rulesets     --input .github/rulesets/$r-main.json --jq '"\(.id) \(.name) \(.enforcement) (created)"'
+  fi
+done
+gh repo view AjinOrg/aws-platform --json autoMergeAllowed,deleteBranchOnMerge     # both true
 ```
 
 | Setting | Why |

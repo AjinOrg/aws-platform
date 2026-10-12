@@ -115,8 +115,11 @@ jobs:
             gh pr close "$old" --delete-branch --comment "Superseded by release of my-app $TAG"
           done
           sed -i -E "s/^(  tag: ).*/\1\"$TAG\"/" "$FILE"
-          git config user.name "platform-release[bot]"
-          git config user.email "platform-release[bot]@users.noreply.github.com"
+          # Commit as the GitHub App's own bot account, so every commit is attributed to the app
+          SLUG="${{ steps.app-token.outputs.app-slug }}"
+          BOT_ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${SLUG}[bot]"
+          git config user.email "${BOT_ID}+${SLUG}[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git commit -am "deploy($TO): my-app $TAG"
           git push --force origin "$BRANCH"
