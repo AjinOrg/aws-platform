@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP # reachable only inside the cluster; the internet comes in through the Ingress (ALB)
+  selector:
+    {{- include "my-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,12 @@
+# my-app in the dev namespace. image.tag is updated by the my-app release pipeline (pull request).
+environment: dev
+image:
+  tag: "20f4799"
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 3
+secrets:
+  secretsManagerKey: platform-dev/my-app/dev
+ingress:
+  path: /dev
+  groupOrder: 10

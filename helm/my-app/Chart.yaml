@@ -1,0 +1,6 @@
+apiVersion: v2
+name: my-app
+description: How my-app runs on the platform (Deployment, Service, Ingress, HPA, PDB, ServiceAccount, ExternalSecret)
+type: application
+version: 0.1.0     # chart version: bump when templates change
+appVersion: "0.1.0"

@@ -64,6 +64,8 @@ module "eks" {
     eks-pod-identity-agent = {
       before_compute = true
     }
+    # CPU/memory usage of pods: needed by the HorizontalPodAutoscaler and `kubectl top`
+    metrics-server = {}
   }
 
   eks_managed_node_groups = {

@@ -1,0 +1,12 @@
+# Limits how many pods voluntary disruptions (Karpenter consolidation, node upgrades) may remove at once
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "my-app.selectorLabels" . | nindent 6 }}

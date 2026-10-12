@@ -16,6 +16,8 @@ it, and read-only commands to look at it. Nothing in this document changes the c
   - [Where the secrets are stored](#where-the-secrets-are-stored)
   - [The objects involved](#the-objects-involved)
   - [Check it (read-only)](#check-it-read-only)
+  - [Known limitation: secrets are not separated per environment](#known-limitation-secrets-are-not-separated-per-environment)
+- [Choosing how pods get secrets](#choosing-how-pods-get-secrets)
 
 ---
 
@@ -200,3 +202,81 @@ aws iam get-policy-version --policy-arn <PolicyArn> --version-id <v1> --query Po
 **About base64:** a Kubernetes Secret value is only *encoded* (base64), not encrypted. Anyone who can
 `kubectl get secret` in that namespace can read it. That is why cluster access is restricted, Secrets are
 encrypted at rest with KMS, and developers get read-only access without Secret permissions later.
+
+### Known limitation: secrets are not separated per environment
+One ClusterSecretStore and one IAM role read all three environments' secrets. The store checks which
+namespace asks, not which secret is asked for:
+
+```
+                         ESO (one delivery person)
+                         holds ONE key (IAM role platform-dev-external-secrets)
+                                    │
+             ┌──────────────────────┼──────────────────────┐
+             ▼                      ▼                      ▼
+     Safe: dev secrets     Safe: staging secrets   Safe: production secrets
+     (key opens it ✅)      (key opens it ✅)        (key opens it ✅)
+
+ExternalSecret in namespace "dev" asking for platform-dev/my-app/production
+   → namespace dev allowed ✅ → role can read production ✅ → production values land in dev ❌
+```
+Fix: one role + one store per environment, each role limited to its own secret, so AWS refuses the
+cross-environment read. Accepted for the POC (only the platform team creates ExternalSecrets, via Git review).
+
+---
+
+## Choosing how pods get secrets
+
+Four ways for a pod to receive secrets from AWS Secrets Manager:
+
+```
+A. External Secrets Operator (current)
+   Secrets Manager ──ESO──▶ Kubernetes Secret ──▶ pod (env vars or mounted files)
+
+B. Secrets Store CSI Driver + AWS provider ("own volume")
+   Secrets Manager ──CSI driver, using the POD's own role──▶ files in a volume inside the pod
+                                                             (optional: also sync to a Kubernetes Secret)
+
+C. Kubernetes Secret created by hand / by a pipeline
+   someone runs kubectl create secret ──▶ Kubernetes Secret ──▶ pod
+
+D. The application reads Secrets Manager itself
+   app code + AWS SDK, using the pod's own role ──▶ value in memory only
+```
+
+| | A. ESO (current) | B. CSI driver ("own volume") | C. Manual Secret | D. App reads AWS |
+|---|---|---|---|---|
+| How the pod sees it | Env vars or files | **Files in a mounted volume** (env vars only via optional sync) | Env vars or files | Variable in code |
+| Kubernetes Secret object | Yes (base64 in etcd, KMS-encrypted) | **No**, unless sync is turned on | Yes | No |
+| Whose AWS identity reads the secret | The operator's one role | **Each app's own IRSA / Pod Identity role** | Whoever creates it | Each app's own role |
+| Separation per environment | Needs one role + store per env (limitation above) | **Natural**: `my-app` in `dev` uses a role that reads only dev secrets | Manual | Natural |
+| Value change reaches the pod | ESO refresh (default 1 h) → env vars need a pod restart; mounted files update | Rotation polling (if enabled) updates the files; the app must re-read them | Manual | App decides |
+| Pod start if AWS unreachable | Starts (Secret already in cluster) | **Fails to start** (volume cannot mount) | Starts | App handles it |
+| Extra components | ESO operator (3 pods) | CSI driver + AWS provider (DaemonSets on every node) | None | None (SDK in the app) |
+| Secrets in Git | No | No (only names, in a SecretProviderClass) | Risk if done badly | No |
+| Effort for developers | Lowest: normal env vars | Low: read files from a path | Low | Highest: code per secret |
+
+### "One secret = one volume" with the CSI driver
+With option B, a `SecretProviderClass` lists which secrets to fetch; each becomes a **file** in the volume:
+
+```
+SecretProviderClass "my-app-dev"            Pod my-app (namespace dev, service account my-app → IRSA role)
+  objects:                                    volume "secrets" (CSI) mounted at /mnt/secrets
+    - platform-dev/my-app/dev                   ├── db-password      ← from JSON key DB_PASSWORD
+        jmesPath: DB_PASSWORD → db-password     ├── api-key          ← from JSON key API_KEY
+        jmesPath: API_KEY     → api-key         └── ...
+```
+- **One volume can hold many secrets** (one file each): simpler than one volume per secret.
+- One volume **per secret** is possible (one SecretProviderClass + one volume each), useful only when
+  different containers in the pod must see different secrets.
+- The 10 dev / 5 staging values can stay as JSON keys in one secret per environment (`jmesPath` splits them
+  into files), or be separate Secrets Manager entries (one `objects` item each).
+
+### Recommendation
+- **Apps that read configuration from files, or teams that want no Kubernetes Secret objects:** option B
+  (CSI driver). It also removes the environment-separation limitation, because each app's own role can read
+  only its environment's secrets.
+- **Apps that expect environment variables:** option A (ESO), with one role + store per environment.
+- Option C is not GitOps (hand-made state, lost on every rebuild); option D ties the app code to AWS.
+
+Changing from A to B later affects only the platform add-ons and the app's Helm chart; the secrets in
+Secrets Manager and the Terraform stay the same (the app's IRSA role gets read access to its own secret).

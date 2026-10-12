@@ -53,6 +53,8 @@ if aws eks describe-cluster --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1
   if kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
     say "1/5 Stop ArgoCD from re-creating things: delete the root app (its children stay for now)"
     kubectl delete application root -n argocd --ignore-not-found --wait=true
+    # ApplicationSets would re-create the Applications they generate: delete them first (their apps go too)
+    kubectl delete applicationsets --all -n argocd --wait=false || true
 
     say "2/5 Delete applications: Ingresses -> ALBs removed, NodePools -> Karpenter nodes removed"
     # The two controllers that clean up AWS resources are kept until their resources are gone

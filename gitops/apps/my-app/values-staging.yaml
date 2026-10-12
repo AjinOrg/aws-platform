@@ -1,0 +1,12 @@
+# my-app in the staging namespace. image.tag is promoted from dev after the dev smoke tests.
+environment: staging
+image:
+  tag: "20f4799"
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 6
+secrets:
+  secretsManagerKey: platform-dev/my-app/staging
+ingress:
+  path: /staging
+  groupOrder: 20

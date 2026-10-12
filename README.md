@@ -20,6 +20,7 @@ repository, **`my-app`**.
 10. [Step 6: EKS Cluster, ECR, Secrets and IRSA (Day 2)](#10-step-6-eks-cluster-ecr-secrets-and-irsa-day-2)
     - [Step 7: ArgoCD, App-of-Apps and the Load Balancer Controller (Day 3)](#10b-step-7-argocd-app-of-apps-and-the-load-balancer-controller-day-3)
     - [Step 8: Platform Add-ons (Day 4)](#10c-step-8-platform-add-ons-day-4)
+    - [Step 9: The Application (Day 5)](#10d-step-9-the-application-day-5)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -887,6 +888,100 @@ kubectl run np-test -n dev --rm -it --restart=Never --image=public.ecr.aws/docke
 
 ---
 
+## 10d. Step 9: The Application (Day 5)
+
+Two repositories, as in the design: **code** in `AjinOrg/my-app`, **how it runs** in `AjinOrg/aws-platform`.
+
+```
+my-app repo                                  aws-platform repo
+├── src/app.js, src/server.js   the service  ├── helm/my-app/                    HOW it runs (chart)
+├── test/app.test.js            7 tests      │   ├── values.yaml                  defaults
+├── Dockerfile                  distroless   │   └── templates/  deployment, service, ingress, hpa,
+├── package.json / eslint                    │                   pdb, serviceaccount, externalsecret
+└── README.md                                ├── gitops/apps/my-app.yaml          AppProject "apps" + ApplicationSet
+                                             └── gitops/apps/my-app/values-{dev,staging,production}.yaml
+                                                                              image tag + per-env settings
+```
+
+### The application (`my-app`)
+- Node.js 22, **no runtime dependencies** (nothing third-party to patch or exploit).
+- `/healthz` (liveness), `/readyz` (readiness, also the ALB health check); any other path returns app info.
+- Reads secrets from **files** (`/etc/my-app/secrets/<KEY>`) on every use: a changed secret arrives without a
+  restart. Handles `SIGTERM` for zero-downtime rollouts. Keep-alive longer than the ALB idle timeout.
+- Image: multi-stage build, **distroless** runtime (no shell), **non-root** (uid 65532), read-only filesystem.
+
+Verified locally: lint OK, 7/7 tests pass, the container runs with `--read-only --cap-drop ALL`, serves `/dev`,
+and reads a mounted secret file; `sh` does not exist in the image.
+
+### The chart (`helm/my-app`)
+
+| Object | Key settings | Why |
+|---|---|---|
+| Deployment | No `replicas` (HPA owns it); `maxUnavailable: 0`; `nodeSelector: node-role: apps`; spread over zones and nodes | Zero-downtime rollouts; runs on Karpenter Spot nodes; one interruption does not take all replicas |
+| Pod security | `runAsNonRoot`, uid 65532, `readOnlyRootFilesystem`, drop ALL capabilities, no privilege escalation, `RuntimeDefault` seccomp | Passes Pod Security `restricted` on the namespaces |
+| Probes | startup + liveness `/healthz`, readiness `/readyz`; `preStop` sleep 10 s | Traffic only to ready pods; ALB stops sending before shutdown |
+| ServiceAccount `my-app` | IRSA `platform-dev-my-app`; `automountServiceAccountToken: false` | Own AWS identity (no permissions yet); no Kubernetes API token |
+| ExternalSecret `my-app` | `platform-dev/my-app/<env>` → Secret `my-app`, refresh 1 h | Values only in Secrets Manager |
+| Secret volume | Whole volume at `/etc/my-app/secrets` (no `subPath`), `optional: true`, mode 0400 | Updates reach the pod; pod starts before the first sync |
+| Service | ClusterIP, port 80 → 8080 | Only reachable through the Ingress |
+| Ingress | Class `alb`; **IngressGroup `my-app`** (one shared ALB); path `/dev`, `/staging`, `/production`; HTTP 80; target type `ip`; health check `/readyz` | One load balancer instead of three (cost); no domain, so environments are told apart by path |
+| HPA | CPU 70 %; min/max dev 1/3, staging 2/6, production 3/20 | Design values; needs metrics-server (EKS add-on, added to Terraform) |
+| PDB | `maxUnavailable: 1` | Consolidation/upgrades remove at most one pod at a time (works with 1 replica too) |
+
+Checked: `helm lint` OK; renders 7 objects per environment; **kubeconform** (strict, incl. ExternalSecret CRD
+schema): 21/21 valid; rendering without `image.tag` fails with "image.tag is required".
+
+### ArgoCD (`gitops/apps/my-app.yaml`)
+- **AppProject `apps`:** only this repository; only namespaces `dev`, `staging`, `production`; only the 7 object
+  kinds the chart needs; **no cluster-wide objects**. Stricter than `platform`.
+- **ApplicationSet `my-app`:** generates `my-app-dev`, `my-app-staging`, `my-app-production`. Each uses two
+  sources from this repository: the chart (`helm/my-app`) and its values file (`$values/gitops/apps/my-app/values-<env>.yaml`).
+- The root app already includes `apps/*.yaml`: no change to `root-app.yaml`.
+- `scripts/platform-stop.sh` now deletes ApplicationSets before Applications (otherwise they would be re-created).
+
+### Deploy (first time, by hand; Day 6 automates the image part)
+```bash
+# 0. Terraform: metrics-server add-on (for the HPA)
+cd ~/workspace/Task/aws-platform/terraform/environments/dev
+terraform plan -out=tfplan        # expect: 1 to add (aws_eks_addon metrics-server)
+terraform apply tfplan
+
+# 1. Secret values (one JSON per environment)
+for ns in dev staging production; do
+  aws secretsmanager put-secret-value --secret-id platform-dev/my-app/$ns \
+    --secret-string "{\"GREETING\":\"hello from $ns\"}"
+done
+
+# 2. Commit the app, build and push the image (tag = commit SHA; ECR tags are immutable)
+cd ~/workspace/Task/my-app
+git add -A && git commit -m "my-app: service, tests, Dockerfile" && git push
+TAG=$(git rev-parse --short HEAD)
+REPO=471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app
+aws ecr get-login-password | docker login --username AWS --password-stdin ${REPO%/*}
+docker build -t $REPO:$TAG . && docker push $REPO:$TAG
+aws ecr describe-image-scan-findings --repository-name my-app --image-id imageTag=$TAG \
+  --query imageScanFindings.findingSeverityCounts      # ECR basic scan on push
+
+# 3. Point the three environments at that tag, push → ArgoCD deploys
+cd ~/workspace/Task/aws-platform
+sed -i "s/REPLACE_WITH_IMAGE_TAG/$TAG/" gitops/apps/my-app/values-*.yaml
+git add -A && git commit -m "Day 5: deploy my-app $TAG to dev, staging, production" && git push
+```
+
+### Verify
+```bash
+kubectl get applications -n argocd | grep my-app        # 3 × Synced / Healthy
+kubectl get pods -n dev -o wide                          # Running on a node-role=apps (Spot) node
+kubectl get nodeclaims                                   # Karpenter launched the node
+kubectl get externalsecret,secret my-app -n dev          # SecretSynced
+kubectl get hpa -n production                            # TARGETS shows a CPU %, 3 replicas
+ALB=$(kubectl get ingress my-app -n dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl -s http://$ALB/dev; echo; curl -s http://$ALB/staging; echo; curl -s http://$ALB/production; echo
+# each answers with its environment and "greeting":"hello from <env>"
+```
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -940,6 +1035,12 @@ Tick each item as it is done.
 | IRSA for every workload | IRSA everywhere except Karpenter, which uses EKS Pod Identity | The Karpenter sub-module of the EKS module (v21) supports only Pod Identity; same security result (short-lived, per service account) |
 | VPC interface endpoints for ECR, STS, Secrets Manager | Off in Dev (`enable_interface_endpoints = false`); S3 gateway endpoint kept | POC cost (~$3/day); traffic goes through NAT, still TLS. One setting turns them back on |
 | Dev runs continuously | Stopped and started on demand (`scripts/platform-stop.sh`, `platform-start.sh`) | POC cost; everything in the cluster is rebuilt from Git |
+
+### Known POC limitations
+
+| # | Limitation | Risk | Fix (when needed) |
+|---|---|---|---|
+| 1 | **Secrets are not separated per environment.** One ClusterSecretStore and one IAM role (`platform-dev-external-secrets`) can read the dev, staging **and** production secrets. The store's `conditions` check only *which namespace* asks, not *which secret* it asks for, so an ExternalSecret in `dev` that names `platform-dev/my-app/production` would receive production's values. | Low today: only the platform team creates ExternalSecrets, through Git review. Real once developers can create objects in `dev` | One IAM role and one store per environment, each role limited to its own secret (AWS then refuses cross-environment reads). Alternatively the Secrets Store CSI Driver with each app's own IRSA role (see [docs/karpenter-and-external-secrets.md](docs/karpenter-and-external-secrets.md#choosing-how-pods-get-secrets)) |
 
 ---
 

@@ -1,0 +1,74 @@
+# my-app: one ApplicationSet creates three Applications (my-app-dev, my-app-staging, my-app-production).
+# Each deploys the chart helm/my-app with its own values file into its own namespace.
+---
+# Project "apps": stricter than "platform". Only this repository, only the three app namespaces,
+# only the object kinds the chart needs, and nothing cluster-wide.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  description: Application workloads
+  sourceRepos:
+    - https://github.com/AjinOrg/aws-platform.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: dev
+    - server: https://kubernetes.default.svc
+      namespace: staging
+    - server: https://kubernetes.default.svc
+      namespace: production
+  clusterResourceWhitelist: [] # no cluster-wide objects (namespaces, CRDs, cluster roles...)
+  namespaceResourceWhitelist:
+    - { group: "", kind: ServiceAccount }
+    - { group: "", kind: Service }
+    - { group: apps, kind: Deployment }
+    - { group: networking.k8s.io, kind: Ingress }
+    - { group: autoscaling, kind: HorizontalPodAutoscaler }
+    - { group: policy, kind: PodDisruptionBudget }
+    - { group: external-secrets.io, kind: ExternalSecret }
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - env: dev
+          - env: staging
+          - env: production
+  template:
+    metadata:
+      name: "my-app-{{ .env }}"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io # deleting the Application removes the app (and its ALB rule)
+    spec:
+      project: apps
+      sources:
+        # The chart...
+        - repoURL: https://github.com/AjinOrg/aws-platform.git
+          targetRevision: main
+          path: helm/my-app
+          helm:
+            releaseName: my-app
+            valueFiles:
+              - "$values/gitops/apps/my-app/values-{{ .env }}.yaml"
+        # ...with the values file from the same repository ("$values" refers to this source)
+        - repoURL: https://github.com/AjinOrg/aws-platform.git
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ .env }}" # created by app-namespaces (Pod Security restricted, default-deny)
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
