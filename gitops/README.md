@@ -10,7 +10,15 @@ gitops/
 │   └── root-app.yaml          app-of-apps: "install every Application in platform/ and apps/"
 ├── platform/                  cluster add-ons (one Application file each)
 │   ├── projects.yaml          AppProject "platform": allowed sources for add-ons
-│   └── aws-load-balancer-controller.yaml
+│   ├── repositories.yaml      OCI chart registries (Karpenter, External Secrets)
+│   ├── aws-load-balancer-controller.yaml
+│   ├── karpenter.yaml / karpenter-nodes.yaml
+│   ├── external-secrets.yaml / external-secrets-store.yaml
+│   └── app-namespaces.yaml
+├── platform-config/           plain manifests used by the Applications above (not read by root directly)
+│   ├── karpenter/             EC2NodeClass + NodePool
+│   ├── external-secrets/      ClusterSecretStore
+│   └── namespaces/            dev, staging, production + default-deny network policies
 └── apps/                      the application (Day 5)
     ├── my-app.yaml            Application(s) for dev / staging / production
     └── my-app/values-*.yaml   per-environment values; the image tag is updated by the app pipeline

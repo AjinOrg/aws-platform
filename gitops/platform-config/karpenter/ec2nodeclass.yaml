@@ -1,0 +1,32 @@
+# HOW Karpenter builds a node: image, network, identity, disk, metadata settings.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: platform-dev-karpenter-node # node IAM role from Terraform; Karpenter creates the instance profile
+  amiSelectorTerms:
+    - alias: al2023@latest # Amazon Linux 2023 EKS image; POC: newest. Production: pin a version (al2023@vYYYYMMDD)
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: platform-dev # the private subnets (tagged by the vpc module)
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: platform-dev # the node security group (tagged by the eks module)
+  kubelet:
+    maxPods: 110 # matches VPC CNI prefix delegation, same as the system nodes
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required          # IMDSv2 only
+    httpPutResponseHopLimit: 1    # pods cannot use the node's IAM role
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 30Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+  tags:
+    Project: aws-platform
+    Environment: dev
+    ManagedBy: karpenter

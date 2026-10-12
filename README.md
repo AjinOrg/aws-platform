@@ -791,6 +791,96 @@ terraform output karpenter         # controller role, node role name, queue name
 aws eks list-pod-identity-associations --cluster-name platform-dev --output table
 kubectl get pods -n kube-system -l app.kubernetes.io/name=eks-pod-identity-agent    # one per node, Running
 ```
+Result in this build: `Plan: 23 to add, 1 to change, 4 to destroy` (Karpenter's AWS side; ECR `force_delete`
+in place; the 4 interface endpoints removed for POC cost). Applied; outputs `platform-dev-karpenter`,
+`platform-dev-karpenter-node`, queue `platform-dev-karpenter`; Pod Identity association `kube-system/karpenter`;
+2 Pod Identity agents running; `AWSServiceRoleForEC2Spot` present.
+
+### The three add-ons (GitOps)
+```
+gitops/platform/                              (picked up by the root app)
+├── repositories.yaml        OCI chart registries for Karpenter and External Secrets (public, no credentials)
+├── projects.yaml            + public.ecr.aws/karpenter, ghcr.io/external-secrets/charts allowed
+├── karpenter.yaml           chart 1.15.0 → kube-system (Pod Identity, interruption queue, system nodes)
+├── karpenter-nodes.yaml     → platform-config/karpenter/        (sync wave 1, retries until CRDs exist)
+├── external-secrets.yaml    chart 2.12.0 → external-secrets (IRSA role platform-dev-external-secrets)
+├── external-secrets-store.yaml → platform-config/external-secrets/ (sync wave 1, retries)
+└── app-namespaces.yaml      → platform-config/namespaces/
+gitops/platform-config/                       (plain manifests, each folder owned by one Application)
+├── karpenter/ec2nodeclass.yaml   HOW nodes are built
+├── karpenter/nodepool.yaml       WHICH nodes are allowed
+├── external-secrets/cluster-secret-store.yaml
+└── namespaces/{dev,staging,production}.yaml   namespace + 3 network policies each
+```
+
+| Setting | Value | Why |
+|---|---|---|
+| Karpenter on system nodes | `nodeSelector: node-role: system` | It must never run on a node it manages (it could remove its own node) |
+| Karpenter `AWS_REGION` env | `ap-south-1` | Pods cannot read instance metadata (hop limit 1) |
+| EC2NodeClass image | `al2023@latest` | POC: always the newest EKS-optimised Amazon Linux 2023. Production: pin a dated version |
+| EC2NodeClass subnets / security groups | by tag `karpenter.sh/discovery: platform-dev` | Set by the vpc and eks modules: no IDs in Git |
+| EC2NodeClass `kubelet.maxPods: 110`, IMDSv2 hop limit 1, encrypted 30 Gi gp3 | | Same as the system nodes |
+| NodePool `apps` | Spot; t/m/c families, 2–4 vCPU, generation > 2; label `node-role: apps` | Cheap; several families = more Spot capacity pools = fewer interruptions. App pods select `node-role: apps` |
+| NodePool limits | 8 vCPU, 32 Gi | Hard ceiling on what Karpenter may launch: cost guard |
+| NodePool `expireAfter: 168h` | | Every node replaced at least weekly with a fresh image |
+| NodePool consolidation | `WhenEmptyOrUnderutilized` after 1 min | Removes empty nodes and repacks pods onto fewer nodes |
+| ClusterSecretStore `aws-secrets-manager` | No `auth` block; `conditions` → dev, staging, production | Uses the operator's IRSA role (no keys); other namespaces cannot use the store |
+| Namespaces | Pod Security `restricted` (enforce, audit, warn) | Pods must run as non-root, drop capabilities, no privilege escalation |
+| `default-deny-all` | All ingress and egress blocked | Nothing talks unless allowed below |
+| `allow-dns-egress` | To CoreDNS (kube-system) on 53 UDP/TCP | Name lookups still work |
+| `allow-from-load-balancer` | From `10.0.96.0/22` (public subnets) to `my-app` pods on 8080 | Only the ALB reaches the app (target type `ip`) |
+| Charts over OCI | Karpenter (public ECR), External Secrets (ghcr.io) | The https chart repos download from GitHub release assets, which time out on this network |
+
+Verified before pushing: both charts render with these values (`helm template`), all 14 manifest files parse,
+and every Karpenter field exists in its v1 CRD schema.
+
+### Verify after ArgoCD has synced
+```bash
+kubectl get applications -n argocd                        # 7 apps Synced/Healthy (karpenter-nodes and
+                                                          # external-secrets-store may retry once: CRDs first)
+# Karpenter
+kubectl get pods -n kube-system -l app.kubernetes.io/name=karpenter -o wide   # 2 Running, system nodes
+kubectl get ec2nodeclass default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'; echo   # True
+kubectl get nodepool apps
+kubectl logs -n kube-system deploy/karpenter --tail=30 | grep -iE "error|denied" || echo "no errors"
+
+# External Secrets
+kubectl get pods -n external-secrets                      # controller, webhook, cert-controller Running
+kubectl get clustersecretstore aws-secrets-manager        # READY True (it can reach Secrets Manager)
+
+# Namespaces and network policies
+kubectl get ns dev staging production --show-labels | grep -o 'enforce=restricted' | wc -l    # 3
+kubectl get networkpolicy -A                              # 3 per namespace
+```
+
+**Functional tests**
+```bash
+# 1. Karpenter launches a Spot node for a pod that asks for node-role=apps
+kubectl create deployment karpenter-test -n default --image=public.ecr.aws/docker/library/busybox:stable -- sleep 3600
+kubectl patch deployment karpenter-test -n default -p '{"spec":{"template":{"spec":{"nodeSelector":{"node-role":"apps"}}}}}'
+kubectl get nodeclaims -w                                 # a NodeClaim appears, Ready in ~1 min
+kubectl get nodes -L node-role,karpenter.sh/capacity-type # new node: apps, spot
+kubectl delete deployment karpenter-test -n default       # node removed ~1 min later (consolidation)
+
+# 2. External Secrets copies a secret (needs a value stored in platform-dev/my-app/dev first)
+cat <<'EOT' | kubectl apply -f -
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: eso-test, namespace: dev }
+spec:
+  secretStoreRef: { kind: ClusterSecretStore, name: aws-secrets-manager }
+  target: { name: eso-test }
+  dataFrom: [ { extract: { key: platform-dev/my-app/dev } } ]
+EOT
+kubectl get externalsecret eso-test -n dev                # STATUS SecretSynced
+kubectl get secret eso-test -n dev -o jsonpath='{.data}'; echo
+kubectl delete externalsecret eso-test -n dev
+
+# 3. Default deny blocks traffic, DNS still works
+kubectl run np-test -n dev --rm -it --restart=Never --image=public.ecr.aws/docker/library/busybox:stable \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-test","image":"public.ecr.aws/docker/library/busybox:stable","command":["sh","-c","nslookup kubernetes.default; wget -T 5 -qO- https://aws.amazon.com || echo BLOCKED"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+# expected: a DNS answer, then BLOCKED
+```
 
 ---
 
@@ -818,7 +908,8 @@ Tick each item as it is done.
 - [ ] ~~Certificate, DNS record and HTTPS ingress~~ not in this build: no domain, the app uses the ALB address over HTTP (Day 5)
 
 **Day 4: Platform add-ons**
-- [ ] Karpenter
+- [x] Karpenter AWS side (Terraform: roles, Pod Identity, interruption queue)
+- [ ] Karpenter controller, EC2NodeClass and NodePool (ArgoCD)
 - [ ] External Secrets Operator and ClusterSecretStore
 - [ ] Default-deny network policies
 

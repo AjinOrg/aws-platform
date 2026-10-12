@@ -1,0 +1,48 @@
+# Karpenter controller: launches EC2 nodes when pods cannot be scheduled and removes them when they are not needed.
+# Its AWS permissions come from EKS Pod Identity (role platform-dev-karpenter, created by Terraform).
+# What kind of nodes it may launch is defined in gitops/platform-config/karpenter/ (Application karpenter-nodes).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: public.ecr.aws/karpenter
+    chart: karpenter
+    targetRevision: 1.15.0
+    helm:
+      valuesObject:
+        settings:
+          clusterName: platform-dev
+          interruptionQueue: platform-dev-karpenter # SQS queue: Spot interruption warnings
+        serviceAccount:
+          name: karpenter # must match the Pod Identity association kube-system/karpenter
+        replicas: 2
+        # Karpenter must never run on a node it manages: keep it on the On-Demand system nodes
+        nodeSelector:
+          kubernetes.io/os: linux
+          node-role: system
+        controller:
+          env:
+            # Pods cannot read instance metadata (hop limit 1), so the region is given explicitly
+            - name: AWS_REGION
+              value: ap-south-1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true # Karpenter's CRDs are too large for a client-side apply annotation

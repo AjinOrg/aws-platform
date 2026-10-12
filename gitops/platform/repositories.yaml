@@ -1,0 +1,32 @@
+# Helm chart registries that ArgoCD reads over OCI. Public registries: no credentials stored here.
+# OCI is used because the https chart repositories of these projects serve their files from GitHub release
+# downloads, which time out on this network.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-karpenter
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository # tells ArgoCD this Secret describes a repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: karpenter
+  type: helm
+  url: public.ecr.aws/karpenter
+  enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-external-secrets
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: external-secrets
+  type: helm
+  url: ghcr.io/external-secrets/charts
+  enableOCI: "true"

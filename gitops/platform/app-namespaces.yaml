@@ -1,0 +1,21 @@
+# The application namespaces (dev, staging, production) with Pod Security "restricted" and
+# default-deny network policies: gitops/platform-config/namespaces/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-namespaces
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/AjinOrg/aws-platform.git
+    targetRevision: main
+    path: gitops/platform-config/namespaces
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
