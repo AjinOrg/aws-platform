@@ -1,0 +1,110 @@
+# Verify a deployment: after an image tag changes in an environment, wait until that environment serves it and
+# run smoke tests. Verifies only - nothing is promoted automatically. Releases to staging and production are
+# started on purpose with release.yaml (or scripts/release.sh).
+name: verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - gitops/apps/my-app/values-*.yaml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to smoke-test
+        type: choice
+        options: [dev, staging, production]
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC → read-only AWS role (to find the load balancer address)
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  # Read-only role (ReadOnlyAccess); trusts only main of this repository. Used to look up the ALB address,
+  # which changes every time Dev is rebuilt.
+  READ_ONLY_ROLE: arn:aws:iam::471112815218:role/aws-platform-terraform-plan
+  INGRESS_GROUP: my-app
+
+jobs:
+  detect:
+    name: Which environments changed
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.d.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: d
+        run: |
+          tag_of() { sed -nE 's/^  tag: "?([^"]+)"?.*/\1/p' "gitops/apps/my-app/values-$1.yaml"; }
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENVS="${{ inputs.environment }}"
+          else
+            ENVS=$(git diff --name-only HEAD~1 HEAD | sed -nE 's#^gitops/apps/my-app/values-(dev|staging|production)\.yaml$#\1#p')
+          fi
+          JSON=$(for e in $ENVS; do printf '{"env":"%s","tag":"%s"}\n' "$e" "$(tag_of "$e")"; done | jq -sc '{include: .}')
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "To verify: $JSON"
+
+  smoke-test:
+    name: Smoke test (${{ matrix.env }})
+    needs: detect
+    if: needs.detect.outputs.matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    env:
+      ENV_NAME: ${{ matrix.env }}
+      TAG: ${{ matrix.tag }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.READ_ONLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: find the load balancer of IngressGroup my-app
+        id: alb
+        run: |
+          ARN=$(aws resourcegroupstaggingapi get-resources \
+                  --tag-filters "Key=ingress.k8s.aws/stack,Values=$INGRESS_GROUP" \
+                  --resource-type-filters elasticloadbalancing:loadbalancer \
+                  --query 'ResourceTagMappingList[0].ResourceARN' --output text)
+          [ -n "$ARN" ] && [ "$ARN" != "None" ] || { echo "::error::No load balancer for IngressGroup $INGRESS_GROUP (is Dev running?)"; exit 1; }
+          DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ARN" --query 'LoadBalancers[0].DNSName' --output text)
+          echo "url=http://$DNS/$ENV_NAME" >> "$GITHUB_OUTPUT"
+      - name: wait until ArgoCD has rolled out the tag (up to 10 minutes)
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          for i in $(seq 1 40); do
+            v=$(curl -fsS --max-time 5 "$URL" | jq -r .version 2>/dev/null || true)
+            [ "$v" = "$TAG" ] && { echo "$ENV_NAME serves $TAG"; exit 0; }
+            echo "attempt $i: $ENV_NAME serves '${v:-nothing}', waiting for $TAG"; sleep 15
+          done
+          echo "::error::$ENV_NAME did not serve $TAG within 10 minutes"; exit 1
+      - name: smoke tests
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          BODY=$(curl -fsS --max-time 5 "$URL") || fail "GET $URL failed"
+          echo "$BODY" | jq .
+          [ "$(echo "$BODY" | jq -r .environment)" = "$ENV_NAME" ] || fail "wrong environment"
+          [ "$(echo "$BODY" | jq -r .version)" = "$TAG" ]          || fail "wrong version"
+          echo "$BODY" | jq -r .greeting | grep -qv '^no GREETING'   || fail "secret not mounted (External Secrets)"
+          for i in $(seq 1 20); do                                  # stable under repeated requests (all replicas)
+            curl -fsS --max-time 5 -o /dev/null "$URL" || fail "request $i failed"
+          done
+          {
+            echo "### ✅ $ENV_NAME serves \`$TAG\` and passed the smoke tests"
+            case "$ENV_NAME" in
+              dev)     echo "Release to staging when ready: Actions → release → Run workflow (staging), or \`scripts/release.sh\`" ;;
+              staging) echo "Release to production when ready: Actions → release → Run workflow (production), or \`scripts/release.sh\`" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"

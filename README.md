@@ -22,6 +22,7 @@ repository, **`my-app`**.
     - [Step 8: Platform Add-ons (Day 4)](#10c-step-8-platform-add-ons-day-4)
     - [Step 9: The Application (Day 5)](#10d-step-9-the-application-day-5)
     - [Step 10: CI Pipelines (Day 6)](#10e-step-10-ci-pipelines-day-6)
+    - [Step 11: Continuous Delivery](#10f-step-11-continuous-delivery-dev--staging--production)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -1106,34 +1107,159 @@ next step (Day 8 in the plan); the files are already in the format the cluster n
 | `CKV2_K8S_6` NetworkPolicy | Applied per namespace by the platform, not by the chart |
 
 ### One-time GitHub settings
-```bash
-# Branch protection: main only through pull requests with green checks (free on public repositories)
-gh api -X PUT repos/AjinOrg/aws-platform/branches/main/protection --input - <<'EOF'
-{ "required_status_checks": { "strict": true, "contexts": [
-    "Secrets scan (Gitleaks)", "Terraform fmt + validate",
-    "Helm lint + kubeconform + Kyverno", "IaC security scan (Checkov)" ] },
-  "enforce_admins": false,
-  "required_pull_request_reviews": { "require_code_owner_reviews": true, "required_approving_review_count": 1 },
-  "restrictions": null }
-EOF
-gh api -X PUT repos/AjinOrg/my-app/branches/main/protection --input - <<'EOF'
-{ "required_status_checks": { "strict": true, "contexts": [
-    "Secrets scan (Gitleaks)", "Lint + unit tests",
-    "Dependencies (npm audit + OWASP Dependency-Check)", "Filesystem scan (Trivy)",
-    "Build image + Trivy + Kyverno (+ push on main)" ] },
-  "enforce_admins": false, "required_pull_request_reviews": null, "restrictions": null }
-EOF
-gh repo edit AjinOrg/aws-platform --enable-auto-merge --delete-branch-on-merge
+Branch protection (rulesets), the GitHub App, SonarQube Cloud and the NVD key are set up in
+[Step 11: Continuous Delivery](#10f-step-11-continuous-delivery-dev--staging--production).
+
+---
+
+## 10f. Step 11: Continuous Delivery (dev → staging → production)
+
+**Principle: approve releases, not commits.** Every check runs on every change. Dev follows every commit
+automatically; staging and production move only when a person **chooses a tested tag and starts the release**.
+
 ```
-- `enforce_admins: false`: with a single maintainer, the owner can still merge their own pull requests
-  (GitHub does not allow approving your own). Turn it on when there is a second reviewer.
-- **OWASP Dependency-Check** needs a free NVD API key (https://nvd.nist.gov/developers/request-an-api-key):
-  `gh secret set NVD_API_KEY -R AjinOrg/my-app`. Without it the job runs `npm audit` and shows a warning.
-- **Deployment pull requests** need a GitHub App (Settings → Developer settings → GitHub Apps → New): permissions
-  *Contents: Read and write*, *Pull requests: Read and write*; install it on `AjinOrg/aws-platform` only; generate a
-  private key. Then `gh variable set PLATFORM_APP_ID -R AjinOrg/my-app` and
-  `gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/my-app < key.pem`. Without it the pipeline still pushes the
-  image and writes the tag to set by hand in the run summary.
+developer push to my-app main
+   │ my-app pipeline: Gitleaks · lint · tests + coverage · SonarQube Cloud quality gate · npm audit/OWASP
+   │                  · Trivy fs · build · Trivy image · Kyverno  → push image to ECR (OIDC)
+   ▼
+DEV         PR deploy/dev/my-app-<sha> → platform-ci green → merges ITSELF            → ArgoCD syncs
+            verify.yaml: waits until /dev serves <sha> → smoke tests  ✅  (nothing moves on by itself)
+   │
+   │  a person tests dev, then STARTS the release (form "Run workflow" or scripts/release.sh menu)
+   │  release.yaml checks: tag is a 7-char SHA · has run in dev · exists in ECR · not already in staging
+   ▼
+STAGING     PR deploy/staging/my-app-<sha> → platform-ci green → merges ITSELF         → ArgoCD syncs
+            verify.yaml: smoke tests on /staging ✅
+   │
+   │  a person STARTS the production release (tag must have run in staging)
+   ▼
+PRODUCTION  PR deploy/production/my-app-<sha> → platform-ci green → Code Owner APPROVES → ArgoCD syncs
+            verify.yaml: smoke tests on /production ✅
+```
+
+| Environment | Moves when | Confirmations | Checks before it changes |
+|---|---|---|---|
+| dev | every merge to my-app `main` | none (automatic) | all my-app checks + platform-ci |
+| staging | a person starts **release → staging** and picks a tag | 1: starting the release | tag ran in dev, exists in ECR; platform-ci |
+| production | a person starts **release → production** and picks a tag | 2: starting the release + Code Owner approval | tag ran in staging, exists in ECR; platform-ci |
+
+### Releasing (the "popup" and the tag list)
+**Option A: GitHub form.** GitHub → `AjinOrg/aws-platform` → **Actions → release → Run workflow**: choose
+`staging` or `production`, type the tag (empty = the tag running now in the previous environment) → **Run workflow**.
+The run summary lists the tags that have run in the previous environment.
+
+**Option B: menu in the terminal** (lists the tested tags to pick from):
+```bash
+cd ~/workspace/Task/aws-platform
+bash scripts/release.sh
+#  1) staging   2) production                      ← choose
+#  Now running:  dev = 1e0f51f   staging = 1e0f51f
+#  1) 1e0f51f  (in dev since 2026-10-12 12:38)      ← pick a tested tag
+#  2) 20f4799  (in dev since 2026-10-12 09:25)
+#  Type the environment name (staging) to confirm:  ← confirm
+```
+GitHub's form cannot show a live dropdown of tags (its options are fixed in the workflow file), which is why the
+form takes the tag as text and the script provides the pick-list.
+
+**Rollback** is the same action with an older tag: `scripts/release.sh` → pick the previous tag (it has run there
+before, so it is accepted) → confirm.
+
+**How the confirmations are enforced:** one ruleset on `main` requires a pull request, green checks and *review
+from Code Owners*, with 0 other approvals. `CODEOWNERS` gives `values-dev.yaml` and `values-staging.yaml` no owner
+and `values-production.yaml` the platform team. Staging changes only through `release.yaml`, which a person must
+start (only people with write access can run workflows); production additionally needs the Code Owner's approval.
+
+| Situation | Handling |
+|---|---|
+| Several my-app pushes close together | One dev deployment job at a time; a newer tag closes older open dev PRs ("superseded") |
+| A release requested twice | Only the newest release PR per environment stays open |
+| Tag never ran in the previous environment | `release.yaml` refuses it (no skipping dev, no skipping staging) |
+| Smoke test fails | `verify.yaml` fails and shows why; release an earlier tag to roll back |
+| Dev rebuilt (new ALB address, empty ECR) | `verify.yaml` finds the ALB by tag `ingress.k8s.aws/stack=my-app`; `release.yaml` refuses tags missing from ECR |
+| PR opened by `GITHUB_TOKEN` | Would not trigger platform-ci: all deployment PRs use the GitHub App token |
+
+**Files**
+
+| Repository | File | Purpose |
+|---|---|---|
+| my-app | `.github/workflows/pipeline.yaml` | Job *Code quality (SonarQube Cloud)*; tests with coverage; dev PR with auto-merge, superseding older PRs |
+| my-app | `sonar-project.properties`, `package.json` (`test:coverage`) | Sonar settings; coverage via Node's built-in lcov reporter (app.js: 100 % lines) |
+| aws-platform | `.github/workflows/verify.yaml` | After any tag change: wait for the rollout, smoke-test that environment. Verifies only |
+| aws-platform | `.github/workflows/release.yaml` | Started by a person: validate the tag, open the staging or production PR |
+| aws-platform | `scripts/release.sh` | Terminal menu: pick environment and tested tag, confirm, start `release.yaml` |
+| aws-platform | `.github/CODEOWNERS` | dev and staging values without owner; production values owned |
+| aws-platform | `.github/rulesets/*.json` | Branch rules for both repositories, as code |
+
+### Setup 1: GitHub App (opens the deployment PRs)
+1. https://github.com/organizations/AjinOrg/settings/apps/new
+   - Name: e.g. `ajinorg-deployer` (must be unique on GitHub); Homepage URL: `https://github.com/AjinOrg`
+   - Webhook: **untick Active**
+   - Repository permissions: **Contents: Read and write**, **Pull requests: Read and write** (Metadata: read, automatic)
+   - Where can it be installed: **Only on this account** → Create
+2. Note the **App ID**; *Generate a private key* (downloads a `.pem`).
+3. *Install App* → AjinOrg → **Only select repositories** → `aws-platform`.
+4. Store the ID and key in both repositories, then delete the local key file:
+```bash
+APP_ID=<app-id>; KEY=/mnt/c/Users/<you>/Downloads/<name>.private-key.pem
+for r in my-app aws-platform; do
+  gh variable set PLATFORM_APP_ID -R AjinOrg/$r --body "$APP_ID"
+  gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/$r < "$KEY"
+done
+shred -u "$KEY" 2>/dev/null || rm -f "$KEY"
+```
+The app can write only to `aws-platform`, and only contents and pull requests; its tokens live 1 hour.
+
+### Setup 2: SonarQube Cloud
+1. https://sonarcloud.io → *Log in with GitHub* → *Import an organization* → `AjinOrg` (installs the SonarQube Cloud
+   app; select `my-app`) → organization key `ajinorg`, **free plan** (public repositories).
+2. *Analyze new project* → `my-app` → method **GitHub Actions** → copy the token:
+   `gh secret set SONAR_TOKEN -R AjinOrg/my-app`
+3. Project → *Administration → Analysis Method* → **turn off Automatic Analysis** (the pipeline does the analysis).
+4. Check that organization and project key match `sonar-project.properties` (`ajinorg`, `AjinOrg_my-app`); adjust the
+   file if SonarQube Cloud shows different keys.
+5. Quality gate: the default *Sonar way* (new code: coverage ≥ 80 %, no new bugs/vulnerabilities, duplication ≤ 3 %).
+   The job waits for the gate (`sonar.qualitygate.wait=true`): a failed gate fails the pipeline.
+
+### Setup 3: Rulesets (branch protection) and auto-merge
+Rulesets instead of classic branch protection: they support the Code Owner rule above and an admin bypass for a
+single maintainer. The JSON files are in `.github/rulesets/`.
+```bash
+cd ~/workspace/Task/aws-platform
+gh repo edit AjinOrg/aws-platform --enable-auto-merge --delete-branch-on-merge
+gh repo edit AjinOrg/my-app       --delete-branch-on-merge
+gh api -X POST repos/AjinOrg/aws-platform/rulesets --input .github/rulesets/aws-platform-main.json
+gh api -X POST repos/AjinOrg/my-app/rulesets       --input .github/rulesets/my-app-main.json
+gh api repos/AjinOrg/aws-platform/rulesets --jq '.[] | [.id,.name,.enforcement] | @tsv'
+gh api repos/AjinOrg/my-app/rulesets       --jq '.[] | [.id,.name,.enforcement] | @tsv'
+```
+
+| Setting | Why |
+|---|---|
+| Pull request required, no force push, no branch deletion | `main` changes only through checked PRs |
+| `require_code_owner_review` + 0 approvals (aws-platform) | Approval only where CODEOWNERS names an owner (production, infrastructure) |
+| `strict_required_status_checks_policy: false` | Bot PRs do not have to be rebased on every new commit to main (would block auto-merge under load); each PR changes one line |
+| Bypass: repository admins, mode `pull_request` | A single maintainer cannot approve their own PR; admins may merge a PR past the rules, but cannot push to main directly. Remove the bypass when a second reviewer exists |
+| my-app: 0 approvals | Single developer for now: raise to 1 when the team grows |
+
+### Setup 4 (optional): NVD API key
+https://nvd.nist.gov/developers/request-an-api-key → `gh secret set NVD_API_KEY -R AjinOrg/my-app`. Enables the
+full OWASP Dependency-Check (without it the job runs `npm audit` and shows a warning).
+
+### Verify the flow
+```bash
+# 1. A change in my-app, through a PR (rulesets are on), merged when the checks are green
+# 2. Dev follows automatically:
+gh run watch -R AjinOrg/my-app                                    # ends with "Dev deployment PR opened"
+gh pr list -R AjinOrg/aws-platform --state all --limit 3          # deploy(dev): ... merged by itself
+gh run list -R AjinOrg/aws-platform --workflow verify.yaml        # smoke test dev ✅
+# 3. Release to staging on purpose:
+bash scripts/release.sh                                           # staging → pick the new tag → confirm
+gh run list -R AjinOrg/aws-platform --workflow verify.yaml        # smoke test staging ✅
+# 4. Release to production:
+bash scripts/release.sh                                           # production → pick → confirm
+gh pr list -R AjinOrg/aws-platform                                # deploy(production): ... waits for approval
+gh pr review <number> -R AjinOrg/aws-platform --approve           # or merge as admin → production, smoke-tested
+```
 
 ---
 
@@ -1176,9 +1302,11 @@ Tick each item as it is done.
 - [x] `my-app` publishes the image to ECR with GitHub OIDC (immutable subject), no stored keys: `1e0f51f`
 - [x] `aws-platform` checks: Gitleaks, Terraform fmt/validate, Helm lint, kubeconform, Kyverno, Checkov
 - [x] Kyverno CLI check in `my-app` (6 policies against the platform chart with the new image)
-- [ ] Fixed image `1e0f51f` (OpenSSL CVEs) deployed to dev, staging, production
-- [ ] Branch protection on both repositories
-- [ ] Optional: NVD API key, GitHub App for automatic deployment pull requests
+- [x] Fixed image `1e0f51f` (OpenSSL CVEs) deployed to dev, staging, production; `platform-ci` green
+- [ ] Rulesets (branch protection) on both repositories
+- [ ] GitHub App: automatic dev deployment PRs; staging/production released on purpose (release.yaml / scripts/release.sh)
+- [ ] SonarQube Cloud quality gate in the my-app pipeline
+- [ ] Optional: NVD API key (full OWASP Dependency-Check)
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
 > by running Terraform from your computer. From Day 8 onwards, every infrastructure change goes through the pipeline.

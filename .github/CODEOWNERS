@@ -1,8 +1,15 @@
-# Reviewers GitHub requires (with branch protection "Require review from Code Owners").
-# Later patterns win. Replace @AjinUrolime with a team (e.g. @AjinOrg/platform) when there is one.
+# Who must approve a pull request, per file (ruleset on main: "require review from Code Owners", 0 other approvals).
+# Later patterns win. A pattern with NO owner means: no approval needed for that file.
+# Replace @AjinUrolime with a team (e.g. @AjinOrg/platform) when there is one.
 *                                            @AjinUrolime
 
-# Production deployments: a person approves every image that reaches production
+# dev: changed automatically by the my-app pipeline after all checks; no approval
+/gitops/apps/my-app/values-dev.yaml
+# staging: changed only by the release workflow, which a person starts on purpose and which accepts only tags
+# that already ran in dev; starting it is the confirmation, so the PR needs no second approval
+/gitops/apps/my-app/values-staging.yaml
+
+# production: started on purpose (release workflow) AND approved by a Code Owner
 /gitops/apps/my-app/values-production.yaml   @AjinUrolime
 
 # Infrastructure, guardrails and pipelines
