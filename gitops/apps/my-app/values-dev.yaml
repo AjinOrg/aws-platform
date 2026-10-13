@@ -1,7 +1,7 @@
 # my-app in the dev namespace. image.tag is updated by the my-app release pipeline (pull request).
 environment: dev
 image:
-  tag: "a7ec651"
+  tag: "edd9422"
 autoscaling:
   minReplicas: 1
   maxReplicas: 3
