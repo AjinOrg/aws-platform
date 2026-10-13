@@ -18,7 +18,9 @@ configs:
   cm:
     admin.enabled: true    # local admin until SSO is configured
     exec.enabled: false    # no "terminal into pod" from the UI
-    timeout.reconciliation: 180s
+    # How often each app checks Git for changes (plus a small random jitter). 60s: a merge reaches the cluster
+    # within ~1-2 minutes. Instant alternative: a GitHub webhook to /api/webhook (needs ArgoCD reachable; Phase 2)
+    timeout.reconciliation: 60s
 
 # No SSO (Dex) yet: access is through kubectl port-forward with the admin password
 dex:
