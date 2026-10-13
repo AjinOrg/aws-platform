@@ -1,7 +1,7 @@
 # my-app in the staging namespace. image.tag is promoted from dev after the dev smoke tests.
 environment: staging
 image:
-  tag: "edd9422"
+  tag: "e9a4292"
 autoscaling:
   minReplicas: 2
   maxReplicas: 6
