@@ -1432,6 +1432,29 @@ kubectl delete clusterpolicy require-probes
 kubectl get clusterpolicy require-probes -w              # restored by ArgoCD within ~1 min
 ```
 
+### Result in this build
+- `kyverno` and `kyverno-policies`: **Synced / Healthy**; 6 ClusterPolicies `READY True`.
+- **Test B passed:** all 4 demo Deployments were rejected by the cluster, each by exactly its own policy. For
+  `bad-privileged` and `bad-root`, Pod Security only printed a warning ("would violate PodSecurity
+  restricted:latest") and Kyverno blocked them: the two layers behave as designed.
+
+```
+Error from server: ... admission webhook "validate.kyverno.svc-fail" denied the request:
+resource Deployment/dev/bad-root was blocked due to the following policies
+require-run-as-non-root: ... Containers must run as non-root: set securityContext.runAsNonRoot: true
+```
+
+**Lesson: permanent OutOfSync on the `policies.kyverno.io` CRDs.** The chart's sub-chart `kyverno-api` renders
+`labels: {}` and `annotations: {}` on 11 CRDs. The API server drops empty maps when it stores an object, so Git and
+cluster never matched (`argocd app diff` showed `> labels: {}`, then `annotations: {}`). Fix: render real values
+(`kyverno-api.labels` / `.annotations` in `kyverno.yaml`) instead of ignoring the difference. Checked by rendering
+the chart: no object has an empty `labels` or `annotations` map. (A first guess, a runtime-patched conversion
+webhook, was ruled out with `managedFields`: only `argocd-controller` and `kube-apiserver` had written the CRD.)
+
+**Deprecation notice:** `kubectl get clusterpolicy` warns that `kyverno.io/v1 ClusterPolicy` is deprecated in favour
+of the CEL-based `ValidatingPolicy` (`policies.kyverno.io`). It still works fully; migrating the 6 policies is in
+the production-grade list.
+
 ---
 
 ## 11. Build Progress (Days 1 to 6)
@@ -1479,9 +1502,27 @@ Tick each item as it is done.
 - [x] End-to-end delivery test passed: my-app merges → dev automatic (a7ec651, edd9422, smoke-tested) → staging released with scripts/release.sh → production released + approved; ArgoCD polling reduced to 60s after observing 3-4 min delays
 - [ ] Phase 2: SonarQube Cloud quality gate (pipeline job ready; skipped with a warning until the `SONAR_TOKEN` secret exists)
 - [ ] Optional: NVD API key (full OWASP Dependency-Check)
-- [ ] Kyverno in the cluster: 6 policies enforced at admission (Step 12)
+- [x] Kyverno in the cluster: 6 policies enforced at admission; all 4 demo Deployments rejected (Step 12)
 - [ ] Planned: pipeline caching (Docker layers, Trivy DB) (see "Pipeline speed" in Step 11)
 - [x] Lighter main run (build, Trivy image, Kyverno, push) + "branch must be up to date" rule on my-app (main run ~1 min instead of ~2–2.5 min); merge queue later when the team merges many times a day
+
+### POC scope: remaining work (agreed 2026-10-13)
+The POC is complete with the items below. Production-grade work starts only after the POC is accepted.
+
+| # | Item | Estimate | Status |
+|---|---|---|---|
+| 1 | Kyverno in the cluster: resolve ArgoCD OutOfSync, run tests A–F (Step 12) | 30 min | **Done** (Synced/Healthy, test B passed) |
+| 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | To do |
+| 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards | ~3 h | To do |
+| 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30 min | To do |
+| 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | To do |
+| 6 | Project docs in `docs/`: architecture, decisions, runbook | 1.5 h | To do |
+
+**Production-grade phase (after acceptance):** delete the temporary IAM access key (after item 2), pipeline caching
+and merge queue, pin GitHub Actions to commit SHAs, pin the Karpenter AMI, remove the root cluster-admin entry,
+separate secret stores per environment, NVD API key, HTTPS with a domain, AWS SSO and ArgoCD SSO, dedicated
+Staging and Production clusters, Kyverno admission controller ×3, migrate the 6 ClusterPolicies to
+ValidatingPolicy (CEL; ClusterPolicy is deprecated in Kyverno 1.19).
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
 > by running Terraform from your computer. From Day 8 onwards, every infrastructure change goes through the pipeline.
