@@ -34,6 +34,16 @@ variable "public_access_cidrs" {
   }
 }
 
+variable "kms_key_administrators" {
+  description = "IAM ARNs that administer the cluster's secrets-encryption KMS key (must not depend on who runs Terraform)"
+  type        = list(string)
+
+  validation {
+    condition     = length(var.kms_key_administrators) > 0
+    error_message = "List at least one key administrator (e.g. the Terraform apply role)."
+  }
+}
+
 variable "admin_principal_arns" {
   description = "IAM users/roles that get cluster-admin through EKS access entries"
   type        = list(string)

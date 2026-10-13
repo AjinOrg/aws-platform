@@ -1,0 +1,151 @@
+# Terraform through pull requests - no more `terraform apply` from a laptop.
+#
+#   PR touching terraform/**  → plan with the READ-ONLY role → plan posted as a PR comment
+#                              (fmt/validate here; Checkov runs in platform-ci; CODEOWNERS approve /terraform/)
+#   merge to main             → plan again (read-only) → saved plan file
+#                              → "Terraform apply (dev)" waits in GitHub Environment "terraform-apply" for a
+#                                reviewer's approval → apply role (trusted ONLY from that environment)
+#                                applies EXACTLY the saved plan (refused if anything changed in between)
+name: terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - terraform/**
+      - .github/workflows/terraform.yaml
+  push:
+    branches: [main]
+    paths:
+      - terraform/**
+      - .github/workflows/terraform.yaml
+  workflow_dispatch: # re-plan / re-apply main on demand (e.g. after a stale-plan refusal)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-dev # one Terraform run at a time (S3 state locking is the second safety net)
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.16.5
+  AWS_REGION: ap-south-1
+  TF_DIR: terraform/environments/dev
+  PLAN_ROLE: arn:aws:iam::471112815218:role/aws-platform-terraform-plan   # ReadOnlyAccess + state
+  APPLY_ROLE: arn:aws:iam::471112815218:role/aws-platform-terraform-apply # admin, environment-only
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  plan:
+    name: Terraform plan (dev)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # GitHub OIDC → read-only role
+      pull-requests: write  # plan comment on the PR
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PLAN_ROLE }}
+          role-session-name: tf-plan-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: init (S3 backend, provider versions from the lock file)
+        run: terraform -chdir="$TF_DIR" init -lockfile=readonly
+      - name: fmt
+        run: terraform fmt -check -recursive terraform
+      - name: validate
+        run: terraform -chdir="$TF_DIR" validate -no-color
+
+      - name: plan
+        id: plan
+        run: |
+          rc=0
+          terraform -chdir="$TF_DIR" plan -lock-timeout=5m -detailed-exitcode -no-color -out=tfplan > plan.txt 2>&1 || rc=$?
+          cat plan.txt
+          case $rc in
+            0) echo "changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::terraform plan failed (exit $rc)"; exit 1 ;;
+          esac
+          SUMMARY=$(grep -E '^(Plan:|No changes\.)' plan.txt | tail -1)
+          echo "summary=${SUMMARY:-see log}" >> "$GITHUB_OUTPUT"
+          { echo "### Terraform plan (dev)"; echo "\`${SUMMARY:-see log}\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: plan as PR comment (one comment, updated on every push)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.plan.outputs.summary }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          MARKER='<!-- terraform-plan-dev -->'
+          BODY_FILE=$(mktemp)
+          {
+            echo "$MARKER"
+            echo "### Terraform plan: dev"
+            echo "**\`$SUMMARY\`** · commit \`${GITHUB_SHA::7}\` · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo
+            echo "<details><summary>Show plan</summary>"
+            echo
+            echo '```'
+            sed -n '/Terraform will perform the following actions/,$p' plan.txt | head -c 60000
+            echo '```'
+            echo "</details>"
+            echo
+            echo "_After merge the same plan is re-created on main and applied only after approval in the \`terraform-apply\` environment._"
+          } > "$BODY_FILE"
+          ID=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1)
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$ID" -F body=@"$BODY_FILE" >/dev/null
+          else
+            gh pr comment "$PR" --body-file "$BODY_FILE"
+          fi
+
+      - name: keep the plan for the apply job (main only)
+        if: github.event_name != 'pull_request' && steps.plan.outputs.changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 1
+
+  apply:
+    name: Terraform apply (dev)
+    needs: plan
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment: the job waits here until someone approves.
+    # The apply role trusts ONLY tokens from this environment (sub ...:environment:terraform-apply).
+    environment: terraform-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.APPLY_ROLE }}
+          role-session-name: tf-apply-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: terraform -chdir="$TF_DIR" init -lockfile=readonly
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev
+          path: ${{ env.TF_DIR }}
+      - name: apply exactly the approved plan
+        run: terraform -chdir="$TF_DIR" apply -lock-timeout=5m -no-color tfplan
