@@ -23,6 +23,9 @@ module "eks" {
   encryption_config = {
     resources = ["secrets"]
   }
+  # Explicit key administrators. The module's default is "whoever runs Terraform", which would flip the key
+  # policy between your user, the pipeline's plan role and its apply role on every run.
+  kms_key_administrators = var.kms_key_administrators
 
   # API server, audit and authenticator logs go to CloudWatch
   enabled_log_types                      = ["api", "audit", "authenticator"]

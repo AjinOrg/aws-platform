@@ -17,6 +17,12 @@ cluster_admin_arns = [
   "arn:aws:iam::471112815218:user/ajin.vijayan@urolime.com",
   "arn:aws:iam::471112815218:root",
 ]
+# Administrators of the EKS secrets KMS key: the pipeline's apply role + the local admin user.
+# Fixed list, so the key policy does not change with whoever runs Terraform.
+kms_key_administrators = [
+  "arn:aws:iam::471112815218:role/aws-platform-terraform-apply",
+  "arn:aws:iam::471112815218:user/ajin.vijayan@urolime.com",
+]
 system_instance_types = ["t3.medium"]
 system_min_size       = 2
 system_max_size       = 3

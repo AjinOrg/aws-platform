@@ -38,6 +38,11 @@ variable "admin_cidrs" {
   type        = list(string)
 }
 
+variable "kms_key_administrators" {
+  description = "IAM principals that administer the EKS secrets KMS key"
+  type        = list(string)
+}
+
 variable "cluster_admin_arns" {
   description = "IAM principals with cluster-admin access"
   type        = list(string)
