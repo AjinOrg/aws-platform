@@ -15,6 +15,7 @@ kubernetes_version = "1.36"               # newest "STANDARD_SUPPORT" version fr
 admin_cidrs        = ["103.141.54.90/32"] # your public IP: curl -s https://checkip.amazonaws.com
 cluster_admin_arns = [
   "arn:aws:iam::471112815218:user/ajin.vijayan@urolime.com",
+  "arn:aws:iam::471112815218:root",
 ]
 system_instance_types = ["t3.medium"]
 system_min_size       = 2

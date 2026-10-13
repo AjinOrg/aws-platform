@@ -1033,15 +1033,15 @@ additionally **publishes** the image and proposes the deployment.
 
 ```
 my-app  (.github/workflows/pipeline.yaml)
-  PR / push main ─┬─ Gitleaks (full history)
-                  ├─ Lint + unit tests (Node 22)
-                  ├─ npm audit + OWASP Dependency-Check (CVSS ≥ 7 fails; needs secret NVD_API_KEY)
-                  └─ Trivy filesystem (vulnerabilities, secrets, Dockerfile misconfigurations)
+  PR only ────────┬─ Gitleaks (full history)
+  (branch must be ├─ Lint + unit tests + coverage (Node 22) → SonarQube Cloud (Phase 2: skipped with a warning)
+   up to date     ├─ npm audit + OWASP Dependency-Check (CVSS ≥ 7 fails; needs secret NVD_API_KEY)
+   with main)     └─ Trivy filesystem (vulnerabilities, secrets, Dockerfile misconfigurations)
                            │ all green
                            ▼
-                  Build image (tag = 7-char commit SHA) → Trivy image (HIGH/CRITICAL with a fix fail)
+  PR and main     Build image (tag = 7-char commit SHA) → Trivy image (HIGH/CRITICAL with a fix fail)
                   → Kyverno: platform policies applied to the platform's chart with THIS image
-                           │ main only
+                           │ main only (lighter run: the checks above already passed on the up-to-date PR)
                            ▼
                   GitHub OIDC → role aws-platform-ecr-push (1 h) → push to ECR (skipped if the tag exists)
                   → GitHub App token → pull request in aws-platform: values-dev.yaml image.tag = <sha>
@@ -1191,6 +1191,65 @@ start (only people with write access can run workflows); production additionally
 | aws-platform | `.github/CODEOWNERS` | dev and staging values without owner; production values owned |
 | aws-platform | `.github/rulesets/*.json` | Branch rules for both repositories, as code |
 
+### Pipeline speed: why checks run twice, and planned improvements
+The my-app checks run on the **pull request** and again on **main** after the merge.
+
+| Run | What it tests | Pushes / deploys |
+|---|---|---|
+| Pull request | The change, merged with main *as it was when the checks started* | Nothing (build + scans only, so a broken Dockerfile or vulnerable image is caught before merge) |
+| main | Exactly what is on main (it also has to build: a squash merge creates a new commit SHA = the image tag) | Image to ECR, dev deployment PR |
+
+Why main re-checks: two PRs can each be green but break when combined (both merged before either was tested with
+the other). Today a PR run takes ~1.5 min and a main run ~2–2.5 min; jobs run in parallel and Actions minutes are
+free on public repositories.
+
+**Planned improvements (not implemented yet)**
+
+| # | Option | Saves | Trade-off | When |
+|---|---|---|---|---|
+| A | **Caching:** Docker layer cache (`docker/build-push-action` with `cache-from/cache-to: type=gha`), Trivy vulnerability database (`actions/cache` on `~/.cache/trivy`), npm (already cached) | 30–50 % per run | None | Next change to the pipeline |
+| B | **Lighter main run:** only build, Trivy image and push on main; lint, tests, Sonar, dependency and filesystem scans only on PRs | ~1 min per merge | Without C, main is no longer re-tested after combining PRs | Together with C |
+| C | **GitHub merge queue:** PRs are tested combined, in merge order, before they reach main (workflow trigger `merge_group`; ruleset rule `merge_queue`) | Makes B safe: nothing untested reaches main | "Merge when ready" instead of an immediate merge; a few minutes in the queue under load | When several developers merge daily |
+| D | **Build once:** the image tested in the queue is the image deployed (tag by the queue's commit, or rebase merges so SHAs match) | One build per change | Needs C (or rebase merges) | Larger teams |
+
+Usual path: **A now; C + B when the team grows; D for large teams.** What slows big pipelines is mostly slow tests,
+not running checks twice: split tests, run only what changed, keep jobs parallel.
+
+**Implemented: B with the "branch must be up to date" rule instead of a merge queue** (A, C, D remain planned)
+
+```
+PR to my-app main:  Gitleaks · lint + tests · Sonar · dependencies · Trivy fs · build · Trivy image · Kyverno
+                    → branch must contain the latest main → all green → merge
+my-app main:        build → Trivy image → push to ECR → dev deployment PR in aws-platform (unchanged)
+```
+
+| Change | Where |
+|---|---|
+| The 5 check jobs run on pull requests only; build + Trivy image (+ Kyverno) on both; push and dev PR on main | `my-app/.github/workflows/pipeline.yaml` |
+| `strict_required_status_checks_policy: true` ("Require branches to be up to date before merging") | `.github/rulesets/my-app-main.json` (my-app only) |
+
+- **Why the up-to-date rule makes the lighter main run safe:** a PR can merge only if it already contains the latest
+  main, so the checks ran on exactly the code that lands on main. Nothing untested reaches main.
+- **Trivy image stays on main** (~14 s): protects against a CVE published between the PR check and the merge.
+- **Not on aws-platform:** there it would hold every bot PR back whenever another PR merges; bot PRs change one line each.
+- **Cost for developers:** sometimes clicking **Update branch** (explained below). Move to the merge queue (C) when
+  that happens many times a day.
+
+**The "Update branch" step, by example**
+```
+09:00  Dev A opens PR-1 (based on main@v1) → checks green
+09:05  Dev B opens PR-2 (based on main@v1) → checks green
+09:10  PR-1 merged → main is now v2 (contains PR-1)
+09:11  PR-2 shows "This branch is out-of-date with the base branch" → Merge is blocked
+       Dev B clicks "Update branch" (or: git pull origin main && git push)
+       → PR-2 now = v1 + PR-1 + PR-2 → checks run again on that combination (~1.5 min)
+09:13  green → merge. What was tested is exactly what main becomes.
+```
+Without the rule, PR-2 would merge with checks that never saw PR-1: fine most of the time, but when PR-1 and PR-2
+touch related code (one renames a function the other calls), main breaks and nobody tested it. The extra effort is
+one click plus one check run, and only when main moved after the PR was checked. Commands:
+`gh pr update-branch <number>` or, locally, `git fetch origin && git merge origin/main && git push`.
+
 ### Setup 1: GitHub App (opens the deployment PRs)
 1. https://github.com/organizations/AjinOrg/settings/apps/new
    - Name: e.g. `ajinorg-deployer` (must be unique on GitHub); Homepage URL: `https://github.com/AjinOrg`
@@ -1248,7 +1307,7 @@ gh repo view AjinOrg/aws-platform --json autoMergeAllowed,deleteBranchOnMerge   
 | `require_code_owner_review` + 0 approvals (aws-platform) | Approval only where CODEOWNERS names an owner (production, infrastructure) |
 | `strict_required_status_checks_policy: false` | Bot PRs do not have to be rebased on every new commit to main (would block auto-merge under load); each PR changes one line |
 | aws-platform bypass: repository admins, mode `pull_request` | A single maintainer cannot approve their own PR; admins may merge a PR past the rules, but cannot push to main directly. Remove the bypass when a second Code Owner exists |
-| my-app: **no bypass**, 0 approvals | Nobody (admins included) can merge without green checks; with 0 approvals nobody needs a bypass. Raise approvals to 1 when the team grows |
+| my-app: **no bypass**, 0 approvals, **branch must be up to date** (`strict: true`) | Nobody (admins included) can merge without green checks; with 0 approvals nobody needs a bypass. Raise approvals to 1 when the team grows |
 
 ### Access for developers
 Developers work in `my-app` through pull requests; the platform team owns `aws-platform`, releases and approvals.
@@ -1342,6 +1401,8 @@ Tick each item as it is done.
 - [x] End-to-end delivery test passed: my-app merges → dev automatic (a7ec651, edd9422, smoke-tested) → staging released with scripts/release.sh → production released + approved; ArgoCD polling reduced to 60s after observing 3-4 min delays
 - [ ] Phase 2: SonarQube Cloud quality gate (pipeline job ready; skipped with a warning until the `SONAR_TOKEN` secret exists)
 - [ ] Optional: NVD API key (full OWASP Dependency-Check)
+- [ ] Planned: pipeline caching (Docker layers, Trivy DB) (see "Pipeline speed" in Step 11)
+- [x] Lighter main run (build, Trivy image, Kyverno, push) + "branch must be up to date" rule on my-app (main run ~1 min instead of ~2–2.5 min); merge queue later when the team merges many times a day
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
 > by running Terraform from your computer. From Day 8 onwards, every infrastructure change goes through the pipeline.
@@ -1363,6 +1424,7 @@ Tick each item as it is done.
 | # | Limitation | Risk | Fix (when needed) |
 |---|---|---|---|
 | 1 | **Secrets are not separated per environment.** One ClusterSecretStore and one IAM role (`platform-dev-external-secrets`) can read the dev, staging **and** production secrets. The store's `conditions` check only *which namespace* asks, not *which secret* it asks for, so an ExternalSecret in `dev` that names `platform-dev/my-app/production` would receive production's values. | Low today: only the platform team creates ExternalSecrets, through Git review. Real once developers can create objects in `dev` | One IAM role and one store per environment, each role limited to its own secret (AWS then refuses cross-environment reads). Alternatively the Secrets Store CSI Driver with each app's own IRSA role (see [docs/karpenter-and-external-secrets.md](docs/karpenter-and-external-secrets.md#choosing-how-pods-get-secrets)) |
+| 2 | **The account root user is a cluster admin** (`arn:aws:iam::471112815218:root` in `cluster_admin_arns`), added on purpose so the EKS console shows workloads when signed in as root. | Root has unlimited power and cannot be restricted; AWS advises not to use it for daily work | Use the IAM user (already an admin entry) or SSO for the console, then remove the root ARN from `cluster_admin_arns` and apply |
 
 ---
 
@@ -1396,7 +1458,7 @@ This is a POC: Dev runs only while it is being used. Resources cost money **only
 | EKS control plane | ~$2.40 / day | Cannot be paused, only deleted |
 | NAT Gateway (1 shared) | ~$1.10 / day + data | Cannot be paused, only deleted |
 | VPC interface endpoints (4 × 3 AZs) | ~$3 / day | **Off** (`enable_interface_endpoints = false`) |
-| System nodes (2 × t3.medium, On-Demand) | ~$2.20 / day | |
+| System nodes (2 × t3.medium, On-Demand) | ~$2.20 / day | Kept at 2 on purpose: 1 node saves only ~$1.10/day but Karpenter's 2nd replica cannot schedule (one per node), ArgoCD/Karpenter/ALB controller share one point of failure, and memory is tight. Stop/start is the bigger saving |
 | App nodes (Karpenter, Spot, from Day 4) | ~$1–2 / day | Only while app pods need them |
 | Load balancer (from Day 5) | ~$0.55 / day | |
 | State bucket, bootstrap KMS key | a few cents / day | Kept when stopped |
