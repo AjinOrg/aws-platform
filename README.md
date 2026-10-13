@@ -1600,3 +1600,4 @@ aws budgets create-budget --account-id 471112815218 \
 | Start fails: log group `/aws/eks/platform-dev/cluster` already exists | `aws logs delete-log-group --log-group-name /aws/eks/platform-dev/cluster`, then start again |
 | Start stops at "Your IP ... is not in admin_cidrs" | Put the printed IP in `terraform.tfvars` and run again |
 | An application stays OutOfSync after a start | `kubectl describe application <name> -n argocd`; usually a missing secret value or image |
+<-- kyverno e2e 2026-10-13T12:19:15Z -->
