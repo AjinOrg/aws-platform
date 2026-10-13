@@ -40,7 +40,6 @@ module "ecr" {
 
   name         = "my-app"
   force_delete = var.ecr_force_delete
-  keep_images  = 25 # test of the Terraform pipeline
 }
 
 module "secrets" {
