@@ -24,6 +24,7 @@ repository, **`my-app`**.
     - [Step 10: CI Pipelines (Day 6)](#10e-step-10-ci-pipelines-day-6)
     - [Step 11: Continuous Delivery](#10f-step-11-continuous-delivery-dev--staging--production)
     - [Step 12: Kyverno in the Cluster](#10g-step-12-kyverno-in-the-cluster-policy-enforcement-at-admission)
+    - [Step 13: Terraform Pipeline](#10h-step-13-terraform-pipeline-infrastructure-through-pull-requests)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -45,7 +46,7 @@ Folders are added step by step as the build progresses.
 | `policies/kyverno/` | Security rules: checked in CI and enforced in the cluster (Kyverno) | Day 6, Step 12 |
 | `monitoring/` | Alert rules and dashboards | Day 9 |
 | `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
-| `.github/workflows/` | Pipelines: platform checks and Terraform | Days 6, 8 |
+| `.github/workflows/` | Pipelines: platform checks, release/verify, Terraform | Day 6, Steps 11, 13 |
 | `docs/` | How-it-works guides (now: Karpenter and External Secrets); later architecture, decisions, runbook | Days 4, 10 |
 
 ### Terraform modules: ours and community
@@ -1457,6 +1458,70 @@ the production-grade list.
 
 ---
 
+## 10h. Step 13: Terraform Pipeline (infrastructure through pull requests)
+
+From now on infrastructure changes go through a pull request, exactly like everything else. Nobody runs
+`terraform apply` from a laptop.
+
+```
+PR touching terraform/**
+   └─ Terraform plan (dev)   OIDC → aws-platform-terraform-plan (ReadOnlyAccess + state)
+        init · fmt -check · validate · plan → posted as ONE PR comment (updated on every push)
+        Checkov: platform-ci · approval: CODEOWNERS (/terraform/) → merge
+
+push to main touching terraform/**
+   ├─ Terraform plan (dev)   read-only role → saved plan file (artifact, 1 day)
+   └─ Terraform apply (dev)  only if the plan has changes
+        ⏸ GitHub Environment "terraform-apply": waits for a required reviewer to approve (Actions UI)
+        OIDC → aws-platform-terraform-apply (trusts ONLY .../aws-platform@...:environment:terraform-apply)
+        terraform apply <the saved plan>   (refused as "stale" if state or code changed in between)
+```
+
+| Point | How |
+|---|---|
+| Read-only plans | The plan role has `ReadOnlyAccess` + the state files: a PR (even a malicious workflow change) cannot change AWS |
+| Approval before apply | GitHub Environment `terraform-apply` with required reviewers; the apply role cannot be assumed from anywhere else |
+| Apply what was reviewed | The plan file from main is applied as-is; a stale plan is refused, run the workflow again |
+| One run at a time | `concurrency: terraform-dev` + S3 state locking (`use_lockfile`) |
+| No secrets in plans | Secret values are never in Terraform (set with the CLI), so the PR comment and the artifact hold none |
+| No cluster access needed | Terraform here uses only the AWS provider; GitHub runners never reach the EKS API (`admin_cidrs` unchanged) |
+
+**Caller-independent KMS key policy.** The EKS module makes *whoever runs Terraform* the administrator of the
+cluster's secrets KMS key unless `kms_key_administrators` is set. Laptop, plan role and apply role would then
+flip the key policy on every run, and every PR plan would show a change nobody made. `terraform.tfvars` now lists
+the administrators explicitly: the apply role and the local admin user.
+
+### Setup (one time)
+```bash
+# 1. Last local apply: the fixed KMS key administrators (expect: 0 add, 1 change, 0 destroy - the key policy)
+cd ~/workspace/Task/aws-platform/terraform/environments/dev
+terraform init && terraform plan -out=tfplan
+terraform apply tfplan && rm -f tfplan
+
+# 2. GitHub Environment "terraform-apply" with you as required reviewer, main only
+REVIEWER_ID=$(gh api users/AjinUrolime --jq .id)
+gh api -X PUT repos/AjinOrg/aws-platform/environments/terraform-apply --input - <<EOF
+{ "wait_timer": 0, "prevent_self_review": false,
+  "reviewers": [ { "type": "User", "id": $REVIEWER_ID } ],
+  "deployment_branch_policy": { "protected_branches": true, "custom_branch_policies": false } }
+EOF
+gh api repos/AjinOrg/aws-platform/environments/terraform-apply \
+  --jq '{name, rules: [.protection_rules[] | .type], branches: .deployment_branch_policy}'
+```
+- `prevent_self_review: false`: a single maintainer merges and approves; set `true` when a second reviewer exists.
+- `protected_branches: true`: only `main` (protected by the ruleset) can deploy to this environment.
+
+### Tests
+| # | Test | Expected |
+|---|---|---|
+| 1 | PR that adds the workflow (no infrastructure change) | Comment "Terraform plan: dev · `No changes.`" (plan role works: OIDC, state, lock, read-only access) |
+| 2 | Merge it | Plan on main: no changes → apply job skipped |
+| 3 | PR with a small change (e.g. `keep_images = 25` for the ECR module in `environments/dev/main.tf`) | Comment shows `Plan: 0 to add, 1 to change, 0 to destroy` (ECR lifecycle policy) |
+| 4 | Merge it | "Terraform apply (dev)" shows **Waiting** → Actions → run → *Review deployments* → approve → applied |
+| 5 | `aws ecr get-lifecycle-policy --repository-name my-app` | Shows the new count |
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1512,7 +1577,7 @@ The POC is complete with the items below. Production-grade work starts only afte
 | # | Item | Estimate | Status |
 |---|---|---|---|
 | 1 | Kyverno in the cluster: resolve ArgoCD OutOfSync, run tests A–F (Step 12) | 30 min | **Done** (Synced/Healthy, test B passed) |
-| 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | To do |
+| 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | Built, to test (Step 13) |
 | 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards | ~3 h | To do |
 | 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30 min | To do |
 | 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | To do |
@@ -1641,3 +1706,4 @@ aws budgets create-budget --account-id 471112815218 \
 | Start fails: log group `/aws/eks/platform-dev/cluster` already exists | `aws logs delete-log-group --log-group-name /aws/eks/platform-dev/cluster`, then start again |
 | Start stops at "Your IP ... is not in admin_cidrs" | Put the printed IP in `terraform.tfvars` and run again |
 | An application stays OutOfSync after a start | `kubectl describe application <name> -n argocd`; usually a missing secret value or image |
+<-- kyverno e2e 2026-10-13T12:19:15Z -->

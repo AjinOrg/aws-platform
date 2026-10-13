@@ -25,6 +25,8 @@ module "eks" {
   public_access_cidrs  = var.admin_cidrs
   admin_principal_arns = var.cluster_admin_arns
 
+  kms_key_administrators = var.kms_key_administrators
+
   system_instance_types = var.system_instance_types
   system_min_size       = var.system_min_size
   system_max_size       = var.system_max_size
@@ -38,6 +40,7 @@ module "ecr" {
 
   name         = "my-app"
   force_delete = var.ecr_force_delete
+  keep_images  = 25 # test of the Terraform pipeline
 }
 
 module "secrets" {
