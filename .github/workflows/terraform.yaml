@@ -80,6 +80,15 @@ jobs:
           SUMMARY=$(grep -E '^(Plan:|No changes\.)' plan.txt | tail -1)
           echo "summary=${SUMMARY:-see log}" >> "$GITHUB_OUTPUT"
           { echo "### Terraform plan (dev)"; echo "\`${SUMMARY:-see log}\`"; } >> "$GITHUB_STEP_SUMMARY"
+          # Readable copy for people (the binary tfplan is only for terraform apply)
+          terraform -chdir="$TF_DIR" show -no-color tfplan > tfplan.txt
+
+      - name: readable plan as a downloadable artifact (tfplan.txt)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev-readable-${{ github.run_number }}
+          path: tfplan.txt
+          retention-days: 7
 
       - name: plan as PR comment (one comment, updated on every push)
         if: github.event_name == 'pull_request'

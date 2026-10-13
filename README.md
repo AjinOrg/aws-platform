@@ -1484,6 +1484,7 @@ push to main touching terraform/**
 | Apply what was reviewed | The plan file from main is applied as-is; a stale plan is refused, run the workflow again |
 | One run at a time | `concurrency: terraform-dev` + S3 state locking (`use_lockfile`) |
 | No secrets in plans | Secret values are never in Terraform (set with the CLI), so the PR comment and the artifact hold none |
+| Readable plan to download | Every run uploads `tfplan.txt` (`terraform show` output, artifact `tfplan-dev-readable-<run>`, 7 days): `gh run download <run-id> -R AjinOrg/aws-platform -n tfplan-dev-readable-<run-number>`. The binary `tfplan` (1 day) is only for `terraform apply` |
 | No cluster access needed | Terraform here uses only the AWS provider; GitHub runners never reach the EKS API (`admin_cidrs` unchanged) |
 
 **Caller-independent KMS key policy.** The EKS module makes *whoever runs Terraform* the administrator of the
