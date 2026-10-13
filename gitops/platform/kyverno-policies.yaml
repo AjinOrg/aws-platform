@@ -1,0 +1,31 @@
+# The 6 ClusterPolicies in policies/kyverno/ (Enforce, namespaces dev/staging/production only).
+# Needs Kyverno's CRDs first: until the "kyverno" Application has installed them, the sync fails and is retried.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/AjinOrg/aws-platform.git
+    targetRevision: main
+    path: policies/kyverno
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true # a policy deleted or edited by hand is restored from Git
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

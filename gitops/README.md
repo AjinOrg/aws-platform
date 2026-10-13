@@ -10,10 +10,11 @@ gitops/
 │   └── root-app.yaml          app-of-apps: "install every Application in platform/ and apps/"
 ├── platform/                  cluster add-ons (one Application file each)
 │   ├── projects.yaml          AppProject "platform": allowed sources for add-ons
-│   ├── repositories.yaml      OCI chart registries (Karpenter, External Secrets)
+│   ├── repositories.yaml      OCI chart registries (Karpenter, External Secrets, Kyverno)
 │   ├── aws-load-balancer-controller.yaml
 │   ├── karpenter.yaml / karpenter-nodes.yaml
 │   ├── external-secrets.yaml / external-secrets-store.yaml
+│   ├── kyverno.yaml / kyverno-policies.yaml   (policies from policies/kyverno/)
 │   └── app-namespaces.yaml
 ├── platform-config/           plain manifests used by the Applications above (not read by root directly)
 │   ├── karpenter/             EC2NodeClass + NodePool
