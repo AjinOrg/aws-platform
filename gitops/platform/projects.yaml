@@ -14,6 +14,7 @@ spec:
     - https://aws.github.io/eks-charts # AWS Load Balancer Controller
     - public.ecr.aws/karpenter # Karpenter (OCI)
     - ghcr.io/external-secrets/charts # External Secrets Operator (OCI)
+    - ghcr.io/kyverno/charts # Kyverno (OCI)
   destinations:
     - server: https://kubernetes.default.svc
       namespace: "*" # add-ons live in several namespaces (kube-system, external-secrets, ...)

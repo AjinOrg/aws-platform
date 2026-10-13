@@ -30,3 +30,18 @@ stringData:
   type: helm
   url: ghcr.io/external-secrets/charts
   enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-kyverno
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: kyverno
+  type: helm
+  url: ghcr.io/kyverno/charts
+  enableOCI: "true"

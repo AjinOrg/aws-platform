@@ -1,0 +1,39 @@
+# Kyverno: admission controller that enforces the policies in policies/kyverno/ inside the cluster.
+# The same policies run in CI (Kyverno CLI, same version v1.19.1): CI gives early feedback on pull requests,
+# the cluster also stops anything that bypasses CI (manual kubectl, other tools).
+# The policies themselves are applied by the Application "kyverno-policies".
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/kyverno/charts
+    chart: kyverno
+    targetRevision: 3.9.1 # Kyverno v1.19.1
+    helm:
+      valuesObject:
+        global:
+          nodeSelector:
+            node-role: system # admission, background, cleanup and reports controllers on the system nodes
+        admissionController:
+          # 2 replicas (one per system node): the webhook "fails closed" for the app namespaces, so a single
+          # replica restarting would briefly refuse new app pods. Production: 3.
+          replicas: 2
+        # On uninstall, remove Kyverno's webhooks too, so a removed Kyverno cannot keep blocking requests
+        webhooksCleanup:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # Kyverno's CRDs are too large for a client-side apply annotation

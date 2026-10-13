@@ -23,6 +23,7 @@ repository, **`my-app`**.
     - [Step 9: The Application (Day 5)](#10d-step-9-the-application-day-5)
     - [Step 10: CI Pipelines (Day 6)](#10e-step-10-ci-pipelines-day-6)
     - [Step 11: Continuous Delivery](#10f-step-11-continuous-delivery-dev--staging--production)
+    - [Step 12: Kyverno in the Cluster](#10g-step-12-kyverno-in-the-cluster-policy-enforcement-at-admission)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -41,7 +42,7 @@ Folders are added step by step as the build progresses.
 | `terraform/environments/` | Settings for each environment: `dev`, `staging`, `production` | Days 1–3 |
 | `gitops/` | What ArgoCD installs: platform add-ons and the app's settings per environment | Days 3–5 |
 | `helm/my-app/` | How the application is packaged for Kubernetes | Day 5 |
-| `policies/kyverno/` | Security rules: checked in CI now, enforced in the cluster from Day 8 | Days 6, 8 |
+| `policies/kyverno/` | Security rules: checked in CI and enforced in the cluster (Kyverno) | Day 6, Step 12 |
 | `monitoring/` | Alert rules and dashboards | Day 9 |
 | `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
 | `.github/workflows/` | Pipelines: platform checks and Terraform | Days 6, 8 |
@@ -1356,6 +1357,83 @@ gh pr review <number> -R AjinOrg/aws-platform --approve           # or merge as 
 
 ---
 
+## 10g. Step 12: Kyverno in the Cluster (policy enforcement at admission)
+
+The 6 policies in `policies/kyverno/` already run in **CI** (Kyverno CLI). This step also enforces them **inside the
+cluster**: the Kubernetes API asks Kyverno about every new or changed object before storing it.
+
+```
+kubectl / ArgoCD / any tool  ──▶  API server
+                                   1. authentication + authorization
+                                   2. admission: Pod Security (namespace label "restricted")
+                                                 Kyverno webhook ──▶ 6 policies
+                                                                      ├─ compliant → stored
+                                                                      └─ violation → REJECTED with the policy message
+```
+
+| Where | When | Catches |
+|---|---|---|
+| CI (Kyverno CLI v1.19.1) | Every pull request | Problems before merge (fast feedback) |
+| Cluster (Kyverno v1.19.1) | Every create/update in dev, staging, production | Everything else: manual `kubectl`, tools that bypass CI |
+
+### Files
+| File | Purpose |
+|---|---|
+| `gitops/platform/kyverno.yaml` | Chart `kyverno` 3.9.1 (Kyverno v1.19.1) from `ghcr.io/kyverno/charts` (OCI) → namespace `kyverno`; all controllers on the system nodes; admission controller ×2; webhook cleanup on uninstall |
+| `gitops/platform/kyverno-policies.yaml` | Applies `policies/kyverno/` (sync wave 1, retries until Kyverno's CRDs exist); self-heal restores a policy changed or deleted by hand |
+| `gitops/platform/repositories.yaml`, `projects.yaml` | OCI registry `ghcr.io/kyverno/charts` added and allowed in project `platform` |
+| `policies/kyverno/*.yaml`, `demo/bad-*.yaml` | Unchanged: the same files CI uses |
+
+| Design point | Choice | Why |
+|---|---|---|
+| Scope | Only `dev`, `staging`, `production` (in each policy's `match`) | Platform namespaces (`kube-system`, `argocd`, `kyverno`, ...) can never be blocked by mistake |
+| Mode | `Enforce` | Proven in CI against the real chart; existing workloads comply |
+| Deployments | Kyverno *autogen* applies the Pod rules to Deployments, ReplicaSets, ... | A bad Deployment is rejected as a whole, with a clear message |
+| Existing workloads | Background scan → **PolicyReports** | Shows compliance of what already runs; running pods are never deleted |
+| Kyverno unavailable | Webhook fails closed for the 3 app namespaces | Nothing unchecked gets in; 2 admission replicas avoid this during a restart. Production: 3 |
+| Capacity | ~4 small pods (~0.5 GB) on the 2 system nodes | Check with `kubectl top nodes` |
+
+**Two layers:** the app namespaces also have Pod Security Admission (`restricted`). For a **Deployment**, Pod
+Security only *warns*; Kyverno *rejects*. Registry, tag, limits and probes are checked only by Kyverno.
+
+| Demo file | Pod Security (restricted) | Kyverno |
+|---|---|---|
+| `bad-privileged.yaml`, `bad-root.yaml` | Warning | **Rejected** |
+| `bad-registry.yaml` (Docker Hub image) | Not checked | **Rejected** |
+| `bad-no-limits.yaml` | Not checked | **Rejected** |
+
+Checked before pushing: chart renders (81 objects; 4 controllers on system nodes; admission ×2); kubeconform 18/18
+valid (incl. the ClusterPolicy schema); Kyverno CLI v1.19.1 rejects all 4 demo files.
+
+### Tests
+```bash
+# A. Installed
+kubectl get applications -n argocd | grep kyverno       # kyverno, kyverno-policies → Synced/Healthy
+kubectl get pods -n kyverno -o wide                      # controllers Running on system nodes
+kubectl get clusterpolicy                                # 6 policies, READY True
+
+# B. Bad workloads are rejected (the demo)
+cd ~/workspace/Task/aws-platform
+for f in demo/bad-*.yaml; do echo "== $f"; kubectl apply -f "$f"; done
+kubectl run test -n dev --image=nginx                    # Docker Hub image → rejected
+
+# C. Good workloads still work
+kubectl get pods -n dev; kubectl get pods -n staging; kubectl get pods -n production
+#   + a normal my-app change → dev updates as usual
+
+# D. Reports for what already runs
+kubectl get policyreport -A                              # PASS counts, FAIL 0
+
+# E. Scope: other namespaces are not affected
+kubectl run scope-test -n default --image=nginx --restart=Never && kubectl delete pod scope-test -n default
+
+# F. GitOps protects the policies
+kubectl delete clusterpolicy require-probes
+kubectl get clusterpolicy require-probes -w              # restored by ArgoCD within ~1 min
+```
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1401,6 +1479,7 @@ Tick each item as it is done.
 - [x] End-to-end delivery test passed: my-app merges → dev automatic (a7ec651, edd9422, smoke-tested) → staging released with scripts/release.sh → production released + approved; ArgoCD polling reduced to 60s after observing 3-4 min delays
 - [ ] Phase 2: SonarQube Cloud quality gate (pipeline job ready; skipped with a warning until the `SONAR_TOKEN` secret exists)
 - [ ] Optional: NVD API key (full OWASP Dependency-Check)
+- [ ] Kyverno in the cluster: 6 policies enforced at admission (Step 12)
 - [ ] Planned: pipeline caching (Docker layers, Trivy DB) (see "Pipeline speed" in Step 11)
 - [x] Lighter main run (build, Trivy image, Kyverno, push) + "branch must be up to date" rule on my-app (main run ~1 min instead of ~2–2.5 min); merge queue later when the team merges many times a day
 
