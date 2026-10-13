@@ -27,11 +27,14 @@ spec:
         # On uninstall, remove Kyverno's webhooks too, so a removed Kyverno cannot keep blocking requests
         webhooksCleanup:
           enabled: true
-        # The policies.kyverno.io CRDs (sub-chart kyverno-api) render "labels: {}" by default. The API server drops
-        # empty maps, so ArgoCD reported those 11 CRDs as OutOfSync forever. A real label makes Git and cluster match.
+        # The policies.kyverno.io CRDs (sub-chart kyverno-api) render "labels: {}" and "annotations: {}" by default.
+        # The API server drops empty maps, so ArgoCD reported those 11 CRDs as OutOfSync forever. A real label and
+        # annotation make Git and cluster match.
         kyverno-api:
           labels:
             app.kubernetes.io/part-of: aws-platform
+          annotations:
+            aws-platform/managed-by: argocd
   destination:
     server: https://kubernetes.default.svc
     namespace: kyverno
