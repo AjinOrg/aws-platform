@@ -1337,8 +1337,9 @@ Tick each item as it is done.
 - [x] `aws-platform` checks: Gitleaks, Terraform fmt/validate, Helm lint, kubeconform, Kyverno, Checkov
 - [x] Kyverno CLI check in `my-app` (6 policies against the platform chart with the new image)
 - [x] Fixed image `1e0f51f` (OpenSSL CVEs) deployed to dev, staging, production; `platform-ci` green
-- [ ] Rulesets (branch protection) on both repositories
+- [x] Rulesets (branch protection) on both repositories (my-app: no bypass; aws-platform: admin bypass via PR until a second Code Owner)
 - [x] GitHub App: automatic dev deployment PRs; staging/production released on purpose (release.yaml / scripts/release.sh)
+- [x] End-to-end delivery test passed: my-app merges → dev automatic (a7ec651, edd9422, smoke-tested) → staging released with scripts/release.sh → production released + approved; ArgoCD polling reduced to 60s after observing 3-4 min delays
 - [ ] Phase 2: SonarQube Cloud quality gate (pipeline job ready; skipped with a warning until the `SONAR_TOKEN` secret exists)
 - [ ] Optional: NVD API key (full OWASP Dependency-Check)
 
