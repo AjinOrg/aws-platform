@@ -783,6 +783,7 @@ The first real load balancer is created by the application's Ingress on Day 5 (e
 | ArgoCD installed with Helm by hand, everything else by ArgoCD | Something has to install ArgoCD first; after that, Git is the only way in |
 | `server.service.type: ClusterIP` + port-forward | The ArgoCD UI is never on the internet; access needs cluster credentials |
 | `exec.enabled: false`, Dex off, notifications off | Fewer features = smaller attack surface; turned on when needed |
+| `timeout.reconciliation: 60s` (was 180s) | How often each app checks Git: a merge reaches the cluster within ~1–2 min. The UI "Refresh" button checks at once. Instant sync needs a GitHub webhook to `/api/webhook`, which requires ArgoCD to be reachable (Phase 2) |
 | AppProject `platform` | Add-ons may only come from this repository and listed chart repositories |
 | Root app has no finalizer | Deleting `root` by mistake does not delete the whole platform |
 | `prune` + `selfHeal` | Removing a file removes the component; manual cluster edits are reverted |
@@ -1246,8 +1247,33 @@ gh repo view AjinOrg/aws-platform --json autoMergeAllowed,deleteBranchOnMerge   
 | Pull request required, no force push, no branch deletion | `main` changes only through checked PRs |
 | `require_code_owner_review` + 0 approvals (aws-platform) | Approval only where CODEOWNERS names an owner (production, infrastructure) |
 | `strict_required_status_checks_policy: false` | Bot PRs do not have to be rebased on every new commit to main (would block auto-merge under load); each PR changes one line |
-| Bypass: repository admins, mode `pull_request` | A single maintainer cannot approve their own PR; admins may merge a PR past the rules, but cannot push to main directly. Remove the bypass when a second reviewer exists |
-| my-app: 0 approvals | Single developer for now: raise to 1 when the team grows |
+| aws-platform bypass: repository admins, mode `pull_request` | A single maintainer cannot approve their own PR; admins may merge a PR past the rules, but cannot push to main directly. Remove the bypass when a second Code Owner exists |
+| my-app: **no bypass**, 0 approvals | Nobody (admins included) can merge without green checks; with 0 approvals nobody needs a bypass. Raise approvals to 1 when the team grows |
+
+### Access for developers
+Developers work in `my-app` through pull requests; the platform team owns `aws-platform`, releases and approvals.
+
+| Team | `my-app` | `aws-platform` | Can | Cannot |
+|---|---|---|---|---|
+| `developers` | **Write** | **Read** | Push branches, open/merge PRs in my-app when checks are green; see the platform code and the Actions runs | Bypass checks, change settings or rulesets, change infrastructure, run release.yaml, approve production |
+| `platform` (Code Owners) | Admin / Maintain | **Write** (+ admin for one owner) | Run `release.yaml`, approve production PRs, change infrastructure through reviewed PRs | Merge their own owned changes without another owner's review (once the aws-platform bypass is removed) |
+
+```bash
+# Organization: no default access to repositories
+gh api -X PATCH orgs/AjinOrg -f default_repository_permission=read
+
+# Teams
+gh api -X POST orgs/AjinOrg/teams -f name=developers -f privacy=closed
+gh api -X POST orgs/AjinOrg/teams -f name=platform   -f privacy=closed
+gh api -X PUT orgs/AjinOrg/teams/developers/repos/AjinOrg/my-app       -f permission=push   # Write
+gh api -X PUT orgs/AjinOrg/teams/developers/repos/AjinOrg/aws-platform -f permission=pull   # Read
+gh api -X PUT orgs/AjinOrg/teams/platform/repos/AjinOrg/aws-platform   -f permission=push   # Write
+gh api -X PUT orgs/AjinOrg/teams/platform/repos/AjinOrg/my-app         -f permission=maintain
+
+# Invite a developer (they receive an email) and add them to the team
+gh api -X PUT orgs/AjinOrg/teams/developers/memberships/<github-username> -f role=member
+```
+Then replace `@AjinUrolime` in `CODEOWNERS` with `@AjinOrg/platform`, so any platform member can approve.
 
 ### Setup 4 (optional): NVD API key
 https://nvd.nist.gov/developers/request-an-api-key → `gh secret set NVD_API_KEY -R AjinOrg/my-app`. Enables the
