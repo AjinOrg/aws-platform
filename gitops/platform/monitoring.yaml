@@ -38,6 +38,12 @@ spec:
         prometheusOperator:
           nodeSelector:
             node-role: apps
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
           admissionWebhooks:
             patch:
               nodeSelector:
@@ -46,6 +52,12 @@ spec:
         kube-state-metrics:
           nodeSelector:
             node-role: apps
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
           # Expose these node labels as metrics (used by the Karpenter capacity alert and the dashboard)
           metricLabelsAllowlist:
             - nodes=[karpenter.sh/nodepool,karpenter.sh/capacity-type,node-role]
@@ -56,6 +68,10 @@ spec:
               node-role: apps
             retention: 2d
             retentionSize: 1500MB # stays below the 2 Gi volume
+            # Stateful (volume): Karpenter must not move it just to save cost (each move = restart + volume re-attach)
+            podMetadata:
+              annotations:
+                karpenter.sh/do-not-disrupt: "true"
             # Pick up every PrometheusRule / ServiceMonitor / PodMonitor in the cluster, not only this release's
             ruleSelectorNilUsesHelmValues: false
             serviceMonitorSelectorNilUsesHelmValues: false
@@ -80,6 +96,15 @@ spec:
             nodeSelector:
               node-role: apps
             retention: 48h
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+              limits:
+                memory: 128Mi
+            podMetadata:
+              annotations:
+                karpenter.sh/do-not-disrupt: "true"
             storage:
               volumeClaimTemplate:
                 spec:
@@ -92,6 +117,16 @@ spec:
         grafana:
           nodeSelector:
             node-role: apps
+          # Without requests Karpenter sized nodes as if Grafana needed nothing (1 GiB micro nodes): it then
+          # started too slowly and failed its health probes
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          podAnnotations:
+            karpenter.sh/do-not-disrupt: "true"
           # Admin login from a Secret created outside Git (README Step 14), never the chart's default password
           admin:
             existingSecret: grafana-admin

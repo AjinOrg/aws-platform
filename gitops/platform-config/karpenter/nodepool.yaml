@@ -33,6 +33,14 @@ spec:
         - key: karpenter.k8s.aws/instance-generation
           operator: Gt
           values: ["2"]
+        # At least ~4 GiB memory and no nano/micro/small sizes: Karpenter picks the cheapest instance that fits the
+        # pods' requests, and 1 GiB micro nodes were too small for Grafana and the monitoring stack
+        - key: karpenter.k8s.aws/instance-memory
+          operator: Gt
+          values: ["3500"] # MiB
+        - key: karpenter.k8s.aws/instance-size
+          operator: NotIn
+          values: ["nano", "micro", "small"]
       expireAfter: 168h # replace every node at least weekly (fresh, patched image)
   # Hard ceiling: Karpenter will not launch beyond this, whatever is requested.
   # 16 vCPU: my-app (dev/staging/production) + the monitoring stack (Step 14). 8 was too low: Grafana could not
@@ -42,4 +50,4 @@ spec:
     memory: 64Gi
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized # remove empty nodes, repack pods onto fewer nodes
-    consolidateAfter: 1m
+    consolidateAfter: 5m # 1m repacked pods too often; stateful monitoring pods also opt out (do-not-disrupt)
