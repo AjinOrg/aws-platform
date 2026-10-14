@@ -45,6 +45,14 @@ helm upgrade --install argocd "$ARGOCD_CHART" -n argocd --create-namespace \
   --version "$ARGOCD_VERSION" -f "$ROOT/gitops/bootstrap/argocd-values.yaml" --wait --timeout 10m
 kubectl apply -f "$ROOT/gitops/bootstrap/root-app.yaml"
 
+# Grafana admin login: random password in a Secret created here, never in Git (gitops/platform/monitoring.yaml)
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if ! kubectl get secret grafana-admin -n monitoring >/dev/null 2>&1; then
+  kubectl create secret generic grafana-admin -n monitoring \
+    --from-literal=admin-user=admin --from-literal=admin-password="$(openssl rand -base64 24)" >/dev/null
+  echo "   Grafana admin secret created"
+fi
+
 say "4/4 Waiting for all applications to be Synced and Healthy (up to 15 minutes)"
 for i in $(seq 1 90); do
   status=$(kubectl get applications -n argocd \
@@ -66,4 +74,6 @@ cat <<EOF
   2. ArgoCD password: kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d
                       then change it (argocd account update-password) and delete that secret
   3. App image:       ECR is empty after a rebuild: re-run the my-app release pipeline (Day 6) or push the image
+  4. Grafana:         kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80  →  http://localhost:3000
+                      password: kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d
 EOF

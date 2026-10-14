@@ -1,0 +1,22 @@
+# StorageClass gp3 (gitops/platform-config/storage/): created before the monitoring stack asks for volumes.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storage
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/AjinOrg/aws-platform.git
+    targetRevision: main
+    path: gitops/platform-config/storage
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,81 @@
+# Log storage and search: Loki in single-binary mode (one pod, filesystem on a 2 Gi gp3 volume, 2 days retention).
+# Logs arrive from Alloy (alloy.yaml); Grafana queries Loki at http://loki.monitoring.svc:3100.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/grafana/helm-charts
+    chart: loki
+    targetRevision: 7.3.0 # Loki 3.6
+    helm:
+      valuesObject:
+        deploymentMode: SingleBinary
+        loki:
+          auth_enabled: false # single tenant
+          commonConfig:
+            replication_factor: 1
+          storage:
+            type: filesystem
+          schemaConfig:
+            configs:
+              - from: "2024-01-01"
+                store: tsdb
+                object_store: filesystem
+                schema: v13
+                index:
+                  prefix: index_
+                  period: 24h
+          limits_config:
+            retention_period: 48h
+          compactor:
+            retention_enabled: true # actually delete logs older than retention_period
+            delete_request_store: filesystem
+        singleBinary:
+          replicas: 1
+          nodeSelector:
+            node-role: apps
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          persistence:
+            enabled: true
+            size: 2Gi
+            storageClass: gp3
+        # Components of the scalable modes, caches, gateway, canary, tests, MinIO: not needed for single binary
+        read:
+          replicas: 0
+        write:
+          replicas: 0
+        backend:
+          replicas: 0
+        chunksCache:
+          enabled: false
+        resultsCache:
+          enabled: false
+        gateway:
+          enabled: false
+        lokiCanary:
+          enabled: false
+        test:
+          enabled: false
+        minio:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
