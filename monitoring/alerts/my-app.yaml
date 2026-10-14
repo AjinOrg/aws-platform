@@ -40,15 +40,15 @@ spec:
     - name: capacity
       rules:
         - alert: KarpenterNodePoolNearLimit
-          # vCPUs of the nodes Karpenter launched for NodePool "apps" vs. its limit of 8 (nodepool.yaml)
+          # vCPUs of the nodes Karpenter launched for NodePool "apps" vs. its limit of 16 (nodepool.yaml)
           expr: |
             sum(
               kube_node_status_capacity{resource="cpu"}
               * on(node) group_left() kube_node_labels{label_karpenter_sh_nodepool="apps"}
-            ) > 6
+            ) > 12
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: "Karpenter NodePool apps uses more than 6 of its 8 vCPU limit"
+            summary: "Karpenter NodePool apps uses more than 12 of its 16 vCPU limit"
             description: "New application pods may stay Pending soon: raise the NodePool limit or reduce load."
