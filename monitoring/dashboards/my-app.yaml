@@ -295,7 +295,7 @@ data:
             {
               "refId": "B",
               "expr": "sum(kube_node_status_capacity{resource=\"cpu\"} * on(node) group_left() kube_node_labels{label_karpenter_sh_nodepool=\"apps\"})",
-              "legendFormat": "vCPU (limit 8)",
+              "legendFormat": "vCPU (limit 16)",
               "datasource": {
                 "type": "prometheus",
                 "uid": "prometheus"

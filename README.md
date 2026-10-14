@@ -872,7 +872,7 @@ gitops/platform-config/                       (plain manifests, each folder owne
 | EC2NodeClass subnets / security groups | by tag `karpenter.sh/discovery: platform-dev` | Set by the vpc and eks modules: no IDs in Git |
 | EC2NodeClass `kubelet.maxPods: 110`, IMDSv2 hop limit 1, encrypted 30 Gi gp3 | | Same as the system nodes |
 | NodePool `apps` | Spot; t/m/c families, 2–4 vCPU, generation > 2; label `node-role: apps` | Cheap; several families = more Spot capacity pools = fewer interruptions. App pods select `node-role: apps` |
-| NodePool limits | 8 vCPU, 32 Gi | Hard ceiling on what Karpenter may launch: cost guard |
+| NodePool limits | 16 vCPU, 64 Gi (was 8 / 32 until monitoring moved onto these nodes) | Hard ceiling on what Karpenter may launch: cost guard |
 | NodePool `expireAfter: 168h` | | Every node replaced at least weekly with a fresh image |
 | NodePool consolidation | `WhenEmptyOrUnderutilized` after 1 min | Removes empty nodes and repacks pods onto fewer nodes |
 | ClusterSecretStore `aws-secrets-manager` | No `auth` block; `conditions` → dev, staging, production | Uses the operator's IRSA role (no keys); other namespaces cannot use the store |
@@ -1573,7 +1573,7 @@ pod logs ── Alloy ────▶│      ▲                               
 | `MyAppDown` | my-app has 0 available replicas in an environment for 2 min |
 | `MyAppHPAAtMax` | The HPA has been at maxReplicas for 10 min |
 | `MyAppHighRestarts` | A my-app pod restarted more than 3 times in 15 min |
-| `KarpenterNodePoolNearLimit` | Karpenter's `apps` nodes use more than 6 of the 8 vCPU limit for 10 min |
+| `KarpenterNodePoolNearLimit` | Karpenter's `apps` nodes use more than 12 of the 16 vCPU limit for 10 min |
 
 **Dashboard "my-app"** (environment selector): available replicas · HPA current/desired/max · CPU per pod ·
 memory per pod · restarts · Karpenter nodes and vCPU · my-app logs (Loki).
