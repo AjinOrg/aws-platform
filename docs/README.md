@@ -10,7 +10,8 @@ differs from the design.
 | [decisions.md](decisions.md) | Reviewers, architects | The 13 design decisions (updated) + 14 decisions made during the build, each with why and the alternative |
 | [trade-offs.md](trade-offs.md) | Reviewers, decision makers | Assumptions, design and POC trade-offs, known limitations, future improvements |
 | [runbook.md](runbook.md) | Operators | Start/stop, daily checks, access, releases and rollback, infrastructure, secrets, scaling, troubleshooting, emergencies |
-| [demo-scenarios.md](demo-scenarios.md) | Presenters | 12 scenarios with commands and expected results; which are already shown |
+| [demo-scenarios.md](demo-scenarios.md) | Presenters | 13 scenarios with commands and expected results; which are already shown |
+| [client-review.md](client-review.md) | Presenter | 60-minute client walkthrough: preparation, order, timing, talking points, clean-up, fallbacks |
 | [karpenter-and-external-secrets.md](karpenter-and-external-secrets.md) | Engineers | How Karpenter and External Secrets work here; choosing how pods get secrets |
 
 The step-by-step build log (every command, check and result) is the repository [README](../README.md).

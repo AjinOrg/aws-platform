@@ -46,9 +46,9 @@ Folders are added step by step as the build progresses.
 | `helm/my-app/` | How the application is packaged for Kubernetes | Day 5 |
 | `policies/kyverno/` | Security rules: checked in CI and enforced in the cluster (Kyverno) | Day 6, Step 12 |
 | `monitoring/` | Alert rules (PrometheusRule) and Grafana dashboards, as code | Step 14 |
-| `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
+| `demo/` | Deliberately bad files (must be rejected), the load test (`load-test.yaml`) | Days 6, 8, Step 15 |
 | `.github/workflows/` | Pipelines: platform checks, release/verify, Terraform | Day 6, Steps 11, 13 |
-| `docs/` | How-it-works guides (Karpenter and External Secrets); as-built architecture, decisions, trade-offs, runbook, demo scenarios (POC item 6) | Days 4, 10 |
+| `docs/` | How-it-works guides (Karpenter and External Secrets); as-built architecture, decisions, trade-offs, runbook, demo scenarios, client review run sheet (POC item 6) | Days 4, 10 |
 
 ### Terraform modules: ours and community
 
@@ -1659,6 +1659,37 @@ Git (helm/my-app/templates/deployment.yaml)      cluster
 
 ---
 
+## 10j. Step 15: Load Test and CI Failure Demos
+
+### Load test (PR #31)
+**What:** `demo/load-test.yaml`: a Job with 3 generator pods (10 min, 64 open requests each against
+`my-app.dev.svc`) plus 2 temporary NetworkPolicies. **Why:** shows the whole scaling chain: CPU → HPA → Pending pods
+→ Karpenter Spot node → scale-down → node removed.
+
+| Decision | Why |
+|---|---|
+| Generator = the my-app image (ECR) running a `node -e` script | No new image to build or scan; passes all Kyverno policies and Pod Security `restricted` |
+| 2 NetworkPolicies inside the test file | `dev` is default-deny (only the ALB reaches my-app); opened for the test only, removed with `kubectl delete -f` |
+| dev only: CPU request 50m → 200m, `maxReplicas` 3 → 10 (`values-dev.yaml`) | 3 × 50m fitted on the existing nodes, so Karpenter never had to act; 10 × 200m = 2 vCPU needs a new node. Via PR, because self-heal would revert a `kubectl` change to the HPA |
+
+Run: [docs/demo-scenarios.md §12](docs/demo-scenarios.md#12-autoscaling-under-load). **Result:** run successfully.
+
+### CI failure demos (draft PRs, never merged)
+Branch `demo/ci-failures` in both repos with planted problems, so one PR shows every check failing. Details and the
+live re-run: [docs/demo-scenarios.md §13](docs/demo-scenarios.md#13-all-ci-gates-fail-in-one-pr). The client walkthrough
+(order, timing, talking points): [docs/client-review.md](docs/client-review.md).
+
+**Lesson: Gitleaks scanned every branch.** After `demo/ci-failures` was pushed, an unrelated docs PR failed Gitleaks
+on `demo/ci-failure/payment.env`. Cause: `actions/checkout` with `fetch-depth: 0` fetches all branches, and
+`gitleaks git` without options runs `git log --all`, so a secret on *any* branch failed *every* PR. Fix (both repos):
+`gitleaks git --log-opts="HEAD"`, which scans only the checked commit's history (in a PR: main plus the PR's commits).
+The demo PRs still fail, because their own history contains the planted key.
+
+**Parked:** Kyverno `require-min-replicas` on branch `policy/require-min-replicas`. It stays out of main so scaling
+down can be shown in the client review; merged afterwards.
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1716,7 +1747,7 @@ The POC is complete with the items below. Production-grade work starts only afte
 | 1 | Kyverno in the cluster: resolve ArgoCD OutOfSync, run tests A–F (Step 12) | 30 min | **Done** (Synced/Healthy, test B passed) |
 | 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | **Done** (plan comment, approval, apply tested: ECR 30 → 25 → 30) |
 | 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards (2 Gi gp3 volumes, EBS CSI add-on) | ~3 h | **Done**: metrics, my-app dashboard, Loki logs, `MyAppDown` fired, volumes persist (Step 14) |
-| 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30–45 min | **Next** |
+| 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30–45 min | **Done**: load test run successfully (Step 15, PR #31) |
 | 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | Deferred: added when application development starts (job ready, skipped without token) |
 | 6 | Project docs in `docs/` (as-built): architecture, decisions, trade-offs, runbook, demo scenarios | 1.5 h | **Done**: `docs/` (architecture, decisions, trade-offs, runbook, demo scenarios, index); update after the load test |
 
