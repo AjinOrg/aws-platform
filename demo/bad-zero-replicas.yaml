@@ -1,0 +1,31 @@
+# DEMO: deliberately non-compliant. Expected result: REJECTED (replicas: 0 - nothing would bring it back).
+# Try: kyverno apply policies/kyverno --resource demo/bad-zero-replicas.yaml      (CI check)
+#      kubectl apply -f demo/bad-zero-replicas.yaml                               (cluster)
+#      kubectl scale deploy my-app -n dev --replicas=0                            (cluster, scale subresource)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-zero-replicas
+  namespace: dev
+spec:
+  replicas: 0
+  selector:
+    matchLabels: { app: bad-zero-replicas }
+  template:
+    metadata:
+      labels: { app: bad-zero-replicas }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app:1e0f51f
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /readyz, port: 8080 }, periodSeconds: 5 }

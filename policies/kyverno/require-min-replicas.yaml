@@ -1,0 +1,39 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-min-replicas
+  annotations:
+    policies.kyverno.io/title: Do not scale applications to zero
+    policies.kyverno.io/description: >-
+      The app's replica count is owned by its HPA, so it is not in Git and ArgoCD cannot restore it; and an HPA does
+      not scale up from 0. A Deployment scaled to 0 (kubectl scale, kubectl edit, a manifest with replicas: 0) would
+      stay down until someone notices. Block it. Break-glass: a PolicyException, or remove the policy through a PR.
+spec:
+  background: false # an admission rule about the request; there is nothing to report on existing objects
+  rules:
+    # kubectl scale / HPA go through the scale subresource (autoscaling/v1 Scale)
+    - name: no-scale-to-zero
+      match:
+        any:
+          - resources:
+              kinds: ["Deployment/scale"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "Scaling to 0 replicas is not allowed in {{ request.namespace }} (the HPA would not bring it back). Use at least 1."
+        pattern:
+          spec:
+            replicas: ">=1"
+    # kubectl apply / edit of the Deployment itself
+    - name: no-zero-replicas
+      match:
+        any:
+          - resources:
+              kinds: ["Deployment"]
+              namespaces: ["dev", "staging", "production"]
+      validate:
+        failureAction: Enforce
+        message: "Deployments in {{ request.namespace }} must not have replicas: 0 (the HPA would not bring them back)."
+        pattern:
+          spec:
+            =(replicas): ">=1" # optional: our chart sets no replicas (the HPA owns them)
