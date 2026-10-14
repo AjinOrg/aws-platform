@@ -136,8 +136,8 @@ AWS Secrets Manager                         Kubernetes cluster
 ──────────────────────                      ─────────────────────────────────
 platform-dev/my-app/dev       ──┐
 platform-dev/my-app/staging   ──┼── ESO reads (IRSA role) ──▶  Secret "my-app" in namespace dev
-platform-dev/my-app/production──┘   every hour / on change     Secret "my-app" in namespace staging ...
-   encrypted with KMS key                                         → mounted into the pod as env vars
+platform-dev/my-app/production──┘   every 10 min               Secret "my-app" in namespace staging ...
+   encrypted with KMS key                                         → mounted into the pod as files
    alias/platform-dev-secrets
 ```
 
@@ -249,7 +249,7 @@ D. The application reads Secrets Manager itself
 | Kubernetes Secret object | Yes (base64 in etcd, KMS-encrypted) | **No**, unless sync is turned on | Yes | No |
 | Whose AWS identity reads the secret | The operator's one role | **Each app's own IRSA / Pod Identity role** | Whoever creates it | Each app's own role |
 | Separation per environment | Needs one role + store per env (limitation above) | **Natural**: `my-app` in `dev` uses a role that reads only dev secrets | Manual | Natural |
-| Value change reaches the pod | ESO refresh (default 1 h) → env vars need a pod restart; mounted files update | Rotation polling (if enabled) updates the files; the app must re-read them | Manual | App decides |
+| Value change reaches the pod | ESO refresh (here 10 min) + ~1–2 min kubelet → mounted files update, no restart (env vars would need one) | Rotation polling (if enabled) updates the files; the app must re-read them | Manual | App decides |
 | Pod start if AWS unreachable | Starts (Secret already in cluster) | **Fails to start** (volume cannot mount) | Starts | App handles it |
 | Extra components | ESO operator (3 pods) | CSI driver + AWS provider (DaemonSets on every node) | None | None (SDK in the app) |
 | Secrets in Git | No | No (only names, in a SecretProviderClass) | Risk if done badly | No |

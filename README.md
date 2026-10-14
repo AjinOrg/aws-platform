@@ -968,7 +968,7 @@ and reads a mounted secret file; `sh` does not exist in the image.
 | Pod security | `runAsNonRoot`, uid 65532, `readOnlyRootFilesystem`, drop ALL capabilities, no privilege escalation, `RuntimeDefault` seccomp | Passes Pod Security `restricted` on the namespaces |
 | Probes | startup + liveness `/healthz`, readiness `/readyz`; `preStop` sleep 10 s | Traffic only to ready pods; ALB stops sending before shutdown |
 | ServiceAccount `my-app` | IRSA `platform-dev-my-app`; `automountServiceAccountToken: false` | Own AWS identity (no permissions yet); no Kubernetes API token |
-| ExternalSecret `my-app` | `platform-dev/my-app/<env>` → Secret `my-app`, refresh 1 h | Values only in Secrets Manager |
+| ExternalSecret `my-app` | `platform-dev/my-app/<env>` → Secret `my-app`, refresh 10 min (was 1 h; see Step 15) | Values only in Secrets Manager |
 | Secret volume | Whole volume at `/etc/my-app/secrets` (no `subPath`), `optional: true`, mode 0400 | Updates reach the pod; pod starts before the first sync |
 | Service | ClusterIP, port 80 → 8080 | Only reachable through the Ingress |
 | Ingress | Class `alb`; **IngressGroup `my-app`** (one shared ALB); path `/dev`, `/staging`, `/production`; HTTP 80; target type `ip`; health check `/readyz` | One load balancer instead of three (cost); no domain, so environments are told apart by path |
@@ -1684,6 +1684,13 @@ on `demo/ci-failure/payment.env`. Cause: `actions/checkout` with `fetch-depth: 0
 `gitleaks git` without options runs `git log --all`, so a secret on *any* branch failed *every* PR. Fix (both repos):
 `gitleaks git --log-opts="HEAD"`, which scans only the checked commit's history (in a PR: main plus the PR's commits).
 The demo PRs still fail, because their own history contains the planted key.
+
+**Change: secret refresh 1 h → 10 min** (`secrets.refreshInterval` in `helm/my-app/values.yaml`, all environments).
+External Secrets *polls* Secrets Manager (AWS does not push changes): one `GetSecretValue` per ExternalSecret per
+interval. 3 ExternalSecrets × 6/h ≈ 13,000 calls/month ≈ $0.07, about 2 MB/day through the NAT Gateway. The
+Kubernetes Secret is only written when the value changed. A new value now reaches the pod within ~10–12 min (ESO
+refresh + ~1–2 min kubelet sync of the mounted file), or ~1–2 min with the `force-sync` annotation. No pod restart:
+the app reads the mounted file on every request.
 
 **Parked:** Kyverno `require-min-replicas` on branch `policy/require-min-replicas`. It stays out of main so scaling
 down can be shown in the client review; merged afterwards.
