@@ -55,7 +55,7 @@ accepts. Production-grade items: README §11 "POC scope".
 | 2 | Account root is a cluster admin (`cluster_admin_arns`) for console visibility | Root has unlimited power | Console via IAM user/SSO; remove the root ARN |
 | 3 | Temporary IAM user access keys on a laptop | Long-lived credential | Delete after the last local Terraform run (now only the pipeline applies) |
 | 4 | HPA-owned replicas are outside GitOps self-heal | Manual scale-to-0 stays | `MyAppDown` (detects); Kyverno `require-min-replicas` (prevents; ready on a branch) |
-| 5 | Secret changes reach pods on the next External Secrets refresh (1 h) | Delay | `force-sync` annotation; or shorter `refreshInterval` |
+| 5 | Secret changes reach pods on the next External Secrets refresh (10 min, plus ~1–2 min for the kubelet) | Short delay | `force-sync` annotation (1–2 min) |
 | 6 | Single region | Regional outage affects all environments | Multi-region (future) |
 | 7 | Image signing not in scope | Unsigned images could be pushed by a compromised pipeline | Cosign + Kyverno image verification |
 | 8 | App exposes no `/metrics` | Only platform metrics (CPU, memory, restarts, replicas) | Prometheus metrics in the app |

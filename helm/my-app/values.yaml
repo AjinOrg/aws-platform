@@ -40,7 +40,7 @@ secrets:
   enabled: true
   secretsManagerKey: platform-dev/my-app/dev
   storeName: aws-secrets-manager
-  refreshInterval: 1h
+  refreshInterval: 10m # poll Secrets Manager every 10 min: 3 ExternalSecrets = ~13k API calls/month (~$0.07), ~2 MB/day via NAT
   mountPath: /etc/my-app/secrets
 
 # One shared ALB for all environments (IngressGroup "my-app"): one load balancer instead of three.

@@ -73,7 +73,7 @@ A release is refused when the tag never ran in the previous environment, is miss
 ```bash
 # set / rotate a value (prefer a file: values in shell history are a leak)
 aws secretsmanager put-secret-value --secret-id platform-dev/my-app/dev --secret-string file://secret.json
-# push it to the cluster now instead of within 1 h
+# push it to the cluster now instead of within 10 min (then ~1–2 min until the file in the pod changes)
 kubectl annotate externalsecret my-app -n dev force-sync=$(date +%s) --overwrite
 kubectl get externalsecret my-app -n dev            # SecretSynced
 kubectl get clustersecretstore aws-secrets-manager  # READY True
