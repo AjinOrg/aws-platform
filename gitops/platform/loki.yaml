@@ -40,6 +40,8 @@ spec:
           replicas: 1
           nodeSelector:
             node-role: apps
+          podAnnotations:
+            karpenter.sh/do-not-disrupt: "true" # stateful (volume): no cost-driven moves
           resources:
             requests:
               cpu: 100m
