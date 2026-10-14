@@ -1679,6 +1679,12 @@ Branch `demo/ci-failures` in both repos with planted problems, so one PR shows e
 live re-run: [docs/demo-scenarios.md §13](docs/demo-scenarios.md#13-all-ci-gates-fail-in-one-pr). The client walkthrough
 (order, timing, talking points): [docs/client-review.md](docs/client-review.md).
 
+**Lesson: Gitleaks scanned every branch.** After `demo/ci-failures` was pushed, an unrelated docs PR failed Gitleaks
+on `demo/ci-failure/payment.env`. Cause: `actions/checkout` with `fetch-depth: 0` fetches all branches, and
+`gitleaks git` without options runs `git log --all`, so a secret on *any* branch failed *every* PR. Fix (both repos):
+`gitleaks git --log-opts="HEAD"`, which scans only the checked commit's history (in a PR: main plus the PR's commits).
+The demo PRs still fail, because their own history contains the planted key.
+
 **Parked:** Kyverno `require-min-replicas` on branch `policy/require-min-replicas`. It stays out of main so scaling
 down can be shown in the client review; merged afterwards.
 
