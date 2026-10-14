@@ -48,7 +48,7 @@ Folders are added step by step as the build progresses.
 | `monitoring/` | Alert rules (PrometheusRule) and Grafana dashboards, as code | Step 14 |
 | `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
 | `.github/workflows/` | Pipelines: platform checks, release/verify, Terraform | Day 6, Steps 11, 13 |
-| `docs/` | How-it-works guides (now: Karpenter and External Secrets); later architecture, decisions, runbook | Days 4, 10 |
+| `docs/` | How-it-works guides (Karpenter and External Secrets); as-built architecture, decisions, trade-offs, runbook, demo scenarios (POC item 6) | Days 4, 10 |
 
 ### Terraform modules: ours and community
 
@@ -1079,6 +1079,7 @@ aws-platform  (.github/workflows/platform-ci.yaml)
 | `require-requests-limits` | Containers without CPU/memory requests or a memory limit (CPU limits deliberately not required) |
 | `disallow-latest-tag` | `:latest` or no tag |
 | `require-probes` | Containers without liveness and readiness probes |
+| `require-min-replicas` | *Prepared, not in main yet* (branch `policy/require-min-replicas`, merged after the client demo): scaling a Deployment to 0 (`kubectl scale` via the `deployments/scale` subresource, or `replicas: 0` in a manifest) |
 
 Used today by the **CI** (Kyverno CLI). Installing Kyverno in the cluster to enforce them at admission is the
 next step (Day 8 in the plan); the files are already in the format the cluster needs.
@@ -1624,6 +1625,38 @@ kubectl scale deploy my-app -n dev --replicas=0
 kubectl delete pod -n monitoring prometheus-monitoring-kube-prometheus-prometheus-0
 ```
 
+### Result in this build
+Metrics, the my-app dashboard, Loki logs, alert rules (`MyAppDown` fired) and volume persistence tested and working.
+
+**Lessons from the rollout**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Grafana `Pending`: "didn't match PersistentVolume's node affinity" + Karpenter "exceed limits for nodepool" | NodePool limit 8 vCPU (set when only my-app used these nodes) was full; Grafana's EBS volume is zonal, so it needed a node in one specific AZ | NodePool limit 16 vCPU / 64 Gi |
+| Grafana restarting (liveness/readiness `connection refused`), constantly moved | Karpenter picks the cheapest instance that fits the pods' **requests**; Grafana, kube-state-metrics and the operator had none → 1 GiB `t8i.micro` nodes; `consolidateAfter: 1m` kept repacking pods | Nodes ≥ ~4 GiB, no nano/micro/small; requests/limits for all monitoring pods; `karpenter.sh/do-not-disrupt` on Prometheus, Alertmanager, Grafana, Loki; `consolidateAfter: 5m` |
+| `my-app` scaled to 0 in dev stayed at 0 | See "Why self-heal did not restore replicas" below | `MyAppDown` alert (detects) + Kyverno `require-min-replicas` (prevents; on branch `policy/require-min-replicas` until after the client demo) |
+
+Rules of thumb: every workload sets resource **requests** (Karpenter sizes nodes from them); revisit NodePool limits
+when a new workload moves onto those nodes; zonal volumes need a node in their AZ; stateful pods opt out of
+cost-driven consolidation.
+
+### Why self-heal did not restore replicas
+```
+Git (helm/my-app/templates/deployment.yaml)      cluster
+  spec: (no "replicas" field - the HPA owns it)    spec.replicas: 0   ← kubectl scale
+  → ArgoCD compares only fields that are in Git: no difference → nothing to heal
+  → HPA at 0 replicas: "scaling is disabled since the replica count of the target is zero" → stays 0
+```
+- **Why replicas are not in Git:** with an HPA, a `replicas` value in Git would fight the HPA: ArgoCD would reset
+  every autoscaling decision to the Git number. Leaving it out is the standard pattern for HPA-managed workloads.
+- **What still protects it:** the `MyAppDown` alert **detects** it (fired in this test); the Kyverno policy
+  `require-min-replicas` will **prevent** it (rejects `kubectl scale --replicas=0` and `replicas: 0` in the app
+  namespaces). It is ready on branch `policy/require-min-replicas` and kept out of main until the client demo of
+  scaling down is done.
+- **Self-heal still covers** everything that *is* in Git: image, resources, probes, labels, Services, Ingress, HPA
+  min/max, deleted objects.
+- **Recover:** `kubectl scale deploy my-app -n <env> --replicas=1` (the HPA takes over again).
+
 ---
 
 ## 11. Build Progress (Days 1 to 6)
@@ -1682,16 +1715,21 @@ The POC is complete with the items below. Production-grade work starts only afte
 |---|---|---|---|
 | 1 | Kyverno in the cluster: resolve ArgoCD OutOfSync, run tests A–F (Step 12) | 30 min | **Done** (Synced/Healthy, test B passed) |
 | 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | **Done** (plan comment, approval, apply tested: ECR 30 → 25 → 30) |
-| 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards (2 Gi gp3 volumes, EBS CSI add-on) | ~3 h | Built, to roll out (Step 14) |
-| 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30 min | To do |
-| 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | To do |
-| 6 | Project docs in `docs/`: architecture, decisions, runbook | 1.5 h | To do |
+| 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards (2 Gi gp3 volumes, EBS CSI add-on) | ~3 h | **Done**: metrics, my-app dashboard, Loki logs, `MyAppDown` fired, volumes persist (Step 14) |
+| 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30–45 min | **Next** |
+| 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | Deferred: added when application development starts (job ready, skipped without token) |
+| 6 | Project docs in `docs/` (as-built): architecture, decisions, trade-offs, runbook, demo scenarios | 1.5 h | **Done**: `docs/` (architecture, decisions, trade-offs, runbook, demo scenarios, index); update after the load test |
+
+**Smaller open points (POC):** Kyverno end-to-end tests 1–4, 6, 7 (Step 12); clean up old local branches and the
+e2e test markers in the my-app README; stop Dev when not in use (`scripts/platform-stop.sh`).
 
 **Production-grade phase (after acceptance):** delete the temporary IAM access key (after item 2), pipeline caching
 and merge queue, pin GitHub Actions to commit SHAs, pin the Karpenter AMI, remove the root cluster-admin entry,
 separate secret stores per environment, NVD API key, HTTPS with a domain, AWS SSO and ArgoCD SSO, dedicated
-Staging and Production clusters, Kyverno admission controller ×3, migrate the 6 ClusterPolicies to
+Staging and Production clusters, Kyverno admission controller ×3, migrate the ClusterPolicies (6, 7 with require-min-replicas) to
 ValidatingPolicy (CEL; ClusterPolicy is deprecated in Kyverno 1.19).
+Alertmanager receivers (Slack/email; secret via Secrets Manager + External Secrets). Separate On-Demand NodePool
+for monitoring (no Spot restarts of Prometheus, no capacity competition with the app).
 Pin EKS add-on versions (`addon_version`) instead of `most_recent`: today every plan includes add-on upgrades that
 AWS published since the last apply (seen in the EBS CSI PR: pod-identity-agent and vpc-cni patch builds); pinned,
 upgrades become deliberate one-purpose PRs.
