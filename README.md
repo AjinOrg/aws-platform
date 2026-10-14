@@ -25,6 +25,7 @@ repository, **`my-app`**.
     - [Step 11: Continuous Delivery](#10f-step-11-continuous-delivery-dev--staging--production)
     - [Step 12: Kyverno in the Cluster](#10g-step-12-kyverno-in-the-cluster-policy-enforcement-at-admission)
     - [Step 13: Terraform Pipeline](#10h-step-13-terraform-pipeline-infrastructure-through-pull-requests)
+    - [Step 14: Monitoring](#10i-step-14-monitoring-metrics-logs-alerts-dashboards)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -40,11 +41,11 @@ Folders are added step by step as the build progresses.
 | `scripts/` | Helper scripts: tool installer; Dev stop/start/status (POC cost saving) | Days 1, 4 |
 | `bootstrap/` | One-time CloudFormation template: Terraform state bucket, KMS key, GitHub login trust and pipeline roles | Day 1 |
 | `terraform/modules/` | Reusable building blocks: `vpc`, `eks`, `ecr`, `iam`, `secrets` | Days 1–2 |
-| `terraform/environments/` | Settings for each environment: `dev`, `staging`, `production` | Days 1–3 |
+| `terraform/environments/` | Settings per environment: `dev` (POC); `staging`, `production` in the production-grade phase | Days 1–3 |
 | `gitops/` | What ArgoCD installs: platform add-ons and the app's settings per environment | Days 3–5 |
 | `helm/my-app/` | How the application is packaged for Kubernetes | Day 5 |
 | `policies/kyverno/` | Security rules: checked in CI and enforced in the cluster (Kyverno) | Day 6, Step 12 |
-| `monitoring/` | Alert rules and dashboards | Day 9 |
+| `monitoring/` | Alert rules (PrometheusRule) and Grafana dashboards, as code | Step 14 |
 | `demo/` | Deliberately bad files (must be rejected), later the load test | Days 6, 8 |
 | `.github/workflows/` | Pipelines: platform checks, release/verify, Terraform | Day 6, Steps 11, 13 |
 | `docs/` | How-it-works guides (now: Karpenter and External Secrets); later architecture, decisions, runbook | Days 4, 10 |
@@ -1523,6 +1524,108 @@ gh api repos/AjinOrg/aws-platform/environments/terraform-apply \
 
 ---
 
+## 10i. Step 14: Monitoring (metrics, logs, alerts, dashboards)
+
+```
+                       ┌──────────────── namespace monitoring (Karpenter Spot nodes) ────────────┐
+cluster metrics ──────▶│ Prometheus (2 Gi, 2 days) ──▶ Alertmanager (2 Gi, 48 h)                  │
+ node-exporter,        │      │                                                                   │
+ kube-state-metrics,   │      ▼                                                                   │──▶ you: port-forward
+ kubelet/cAdvisor      │  Grafana (2 Gi) ◀── dashboards: Kubernetes (built-in) + my-app (ours)     │    (nothing exposed)
+pod logs ── Alloy ────▶│      ▲                                                                   │
+ (Kubernetes API)      │    Loki (2 Gi, 48 h)                                                     │
+                       └──────────────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Chart | Source |
+|---|---|---|
+| Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics, Prometheus Operator | `kube-prometheus-stack` 92.3.1 | OCI `ghcr.io/prometheus-community/charts` |
+| Loki (single binary, filesystem) | `loki` 7.3.0 (Loki 3.6) | OCI `ghcr.io/grafana/helm-charts` |
+| Alloy (log collector) | `alloy` 1.13.1 | `https://grafana.github.io/helm-charts` (not published over OCI) |
+| EBS CSI driver (volumes) | EKS add-on `aws-ebs-csi-driver` | Terraform (`modules/eks`), role `platform-dev-ebs-csi` via Pod Identity |
+
+### Files
+| File | Purpose |
+|---|---|
+| `terraform/modules/eks/main.tf` | Add-on `aws-ebs-csi-driver` + IAM role `platform-dev-ebs-csi` (policy `AmazonEBSCSIDriverPolicy`, Pod Identity for `kube-system/ebs-csi-controller-sa`) |
+| `gitops/platform/storage.yaml` → `platform-config/storage/gp3.yaml` | Default StorageClass `gp3`: encrypted, `WaitForFirstConsumer` (volume in the pod's AZ), `reclaimPolicy: Delete`, expandable |
+| `gitops/platform/monitoring.yaml` | kube-prometheus-stack; EKS-managed control-plane targets disabled (no false "Down" alerts) |
+| `gitops/platform/loki.yaml`, `alloy.yaml` | Logs: Alloy reads pod logs via the Kubernetes API and pushes them to Loki |
+| `gitops/platform/monitoring-config.yaml` → `monitoring/` | Monitoring as code: `alerts/my-app.yaml` (PrometheusRule), `dashboards/my-app.yaml` (Grafana dashboard ConfigMap) |
+| `gitops/platform/repositories.yaml`, `projects.yaml` | The 3 chart sources added and allowed |
+| `scripts/platform-start.sh` | Creates the `grafana-admin` Secret (random password, never in Git) |
+| `scripts/platform-stop.sh` | Deletes PVCs while the EBS CSI driver still runs (so their volumes are deleted), then removes leftover volumes |
+
+| POC decision | Value | Production-grade |
+|---|---|---|
+| Where it runs | Karpenter Spot nodes (`node-role: apps`); node-exporter on every node | Dedicated on-demand nodes or managed services (AMP/AMG) |
+| Storage | 2 Gi gp3 per component (Prometheus, Alertmanager, Grafana, Loki), encrypted | Larger volumes; Loki on S3 |
+| Retention | Prometheus 2 days (max 1.5 GB), Loki 48 h, Alertmanager 48 h | 15–30 days |
+| Access | `kubectl port-forward` | SSO + internal load balancer |
+| Alert delivery | Alertmanager / Grafana UI only | Slack / email / PagerDuty receivers |
+| App metrics | Platform metrics (CPU, memory, restarts, replicas, HPA) | `/metrics` in the app (requests, latency, errors) |
+| Logs | Alloy ×1 via the Kubernetes API | Alloy DaemonSet reading node log files |
+
+**Our alerts (`monitoring/alerts/my-app.yaml`)**, in addition to the chart's standard Kubernetes alerts:
+
+| Alert | Fires when |
+|---|---|
+| `MyAppDown` | my-app has 0 available replicas in an environment for 2 min |
+| `MyAppHPAAtMax` | The HPA has been at maxReplicas for 10 min |
+| `MyAppHighRestarts` | A my-app pod restarted more than 3 times in 15 min |
+| `KarpenterNodePoolNearLimit` | Karpenter's `apps` nodes use more than 6 of the 8 vCPU limit for 10 min |
+
+**Dashboard "my-app"** (environment selector): available replicas · HPA current/desired/max · CPU per pod ·
+memory per pod · restarts · Karpenter nodes and vCPU · my-app logs (Loki).
+
+| Detail | Why |
+|---|---|
+| Grafana `deploymentStrategy: Recreate` | An EBS volume attaches to one node at a time; a rolling update would leave the new pod waiting ("Multi-Attach error") |
+| Grafana admin from Secret `grafana-admin` | The chart's default password is public; a generated password would change on every ArgoCD render |
+| `kube-state-metrics.metricLabelsAllowlist` for node labels | Lets alerts and the dashboard tell Karpenter's nodes apart |
+| No network-policy change | Prometheus scrapes kubelet and kube-state-metrics, not the app pods |
+
+Checked before pushing: the 3 charts render with these values (109 / 9 / 6 objects); every workload on
+`node-role: apps` except node-exporter; 4 volumes gp3 2 Gi; Grafana admin from `grafana-admin`; Grafana's Loki URL
+matches Loki's service (3100); Loki retention 48 h with deletion; Alloy may read `pods/log`; kubeconform 36/36 valid
+(+1 known skip); dashboard JSON valid (7 panels); Terraform validate + fmt.
+
+### Rollout (order matters)
+1. **Terraform PR** (EBS CSI driver) through the Terraform pipeline: plan comment → merge → approve apply.
+2. **Grafana admin Secret** (once; `platform-start.sh` does it after a rebuild):
+   ```bash
+   kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+   kubectl create secret generic grafana-admin -n monitoring \
+     --from-literal=admin-user=admin --from-literal=admin-password="$(openssl rand -base64 24)"
+   ```
+3. **GitOps PR** (storage, monitoring, loki, alloy, monitoring-config, scripts, README) → ArgoCD installs it.
+
+### Tests
+```bash
+# A. Installed
+kubectl get applications -n argocd | grep -E "storage|monitoring|loki|alloy"     # Synced / Healthy
+kubectl get pods -n monitoring -o wide                     # Running; on a node-role=apps node
+kubectl get pvc -n monitoring                              # 4 × Bound, 2Gi, gp3
+kubectl get pods -n kube-system -l app=ebs-csi-controller  # EBS CSI driver Running
+
+# B. Grafana
+kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80
+kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d; echo
+#   http://localhost:3000 (admin) → Dashboards → "my-app" and "Kubernetes / Compute Resources / Namespace (Pods)"
+
+# C. Logs: Grafana → Explore → Loki → {namespace="dev"}
+
+# D. Alert: my-app down in dev (ArgoCD self-heals it back within ~1 min)
+kubectl scale deploy my-app -n dev --replicas=0
+#   Alertmanager / Grafana → Alerting: MyAppDown pending → firing (after 2 min) → resolved after self-heal
+#   (self-heal may restore it before 2 min: then MyAppDown stays "pending" and clears - also correct)
+
+# E. Persistence: delete the Prometheus pod; it comes back with its data (same PVC)
+kubectl delete pod -n monitoring prometheus-monitoring-kube-prometheus-prometheus-0
+```
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1578,8 +1681,8 @@ The POC is complete with the items below. Production-grade work starts only afte
 | # | Item | Estimate | Status |
 |---|---|---|---|
 | 1 | Kyverno in the cluster: resolve ArgoCD OutOfSync, run tests A–F (Step 12) | 30 min | **Done** (Synced/Healthy, test B passed) |
-| 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | Built, to test (Step 13) |
-| 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards | ~3 h | To do |
+| 2 | Terraform pipeline: plan on every PR, apply after approval (GitHub Environment `terraform-apply`) | ~2 h | **Done** (plan comment, approval, apply tested: ECR 30 → 25 → 30) |
+| 3 | Monitoring: Prometheus, Grafana, Loki, alerts, dashboards (2 Gi gp3 volumes, EBS CSI add-on) | ~3 h | Built, to roll out (Step 14) |
 | 4 | Load test: HPA + Karpenter scale up and down, watched in Grafana (`demo/load-test.yaml`) | 30 min | To do |
 | 5 | SonarQube Cloud quality gate (pipeline job ready) | 20 min | To do |
 | 6 | Project docs in `docs/`: architecture, decisions, runbook | 1.5 h | To do |
@@ -1589,6 +1692,13 @@ and merge queue, pin GitHub Actions to commit SHAs, pin the Karpenter AMI, remov
 separate secret stores per environment, NVD API key, HTTPS with a domain, AWS SSO and ArgoCD SSO, dedicated
 Staging and Production clusters, Kyverno admission controller ×3, migrate the 6 ClusterPolicies to
 ValidatingPolicy (CEL; ClusterPolicy is deprecated in Kyverno 1.19).
+Pin EKS add-on versions (`addon_version`) instead of `most_recent`: today every plan includes add-on upgrades that
+AWS published since the last apply (seen in the EBS CSI PR: pod-identity-agent and vpc-cni patch builds); pinned,
+upgrades become deliberate one-purpose PRs.
+Terraform pipeline for more environments: `environments/staging` and `environments/production` (own state and
+tfvars), a matrix of only the affected environments (module changes: all, in order dev → staging → production),
+one GitHub Environment per stage with its own reviewers, and preferably one AWS account per environment
+(bootstrap per account).
 
 > **Note:** the Terraform pipeline (with manual approval) is built on Day 8. Until then, Dev is built
 > by running Terraform from your computer. From Day 8 onwards, every infrastructure change goes through the pipeline.

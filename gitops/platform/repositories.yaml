@@ -45,3 +45,33 @@ stringData:
   type: helm
   url: ghcr.io/kyverno/charts
   enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-prometheus-community
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: prometheus-community
+  type: helm
+  url: ghcr.io/prometheus-community/charts
+  enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-grafana-oci
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: grafana-oci
+  type: helm
+  url: ghcr.io/grafana/helm-charts
+  enableOCI: "true"

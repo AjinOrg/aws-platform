@@ -15,6 +15,9 @@ spec:
     - public.ecr.aws/karpenter # Karpenter (OCI)
     - ghcr.io/external-secrets/charts # External Secrets Operator (OCI)
     - ghcr.io/kyverno/charts # Kyverno (OCI)
+    - ghcr.io/prometheus-community/charts # kube-prometheus-stack (OCI)
+    - ghcr.io/grafana/helm-charts # Loki (OCI)
+    - https://grafana.github.io/helm-charts # Alloy (not published over OCI)
   destinations:
     - server: https://kubernetes.default.svc
       namespace: "*" # add-ons live in several namespaces (kube-system, external-secrets, ...)

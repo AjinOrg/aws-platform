@@ -83,6 +83,17 @@ if aws eks describe-cluster --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1
     kubectl delete applications --all -n argocd --wait=true --timeout=5m || true
     helm uninstall argocd -n argocd --wait || true
   fi
+
+  # Volumes for PersistentVolumeClaims are created by the EBS CSI driver, not by Terraform. Delete the claims
+  # while the driver still runs, so it deletes the EBS volumes (StorageClass reclaimPolicy: Delete).
+  if [ -n "$(kubectl get pvc -A --no-headers 2>/dev/null)" ]; then
+    echo "   deleting PersistentVolumeClaims (their EBS volumes are deleted with them)"
+    kubectl delete pvc --all -A --wait=true --timeout=5m || true
+    for i in $(seq 1 30); do
+      [ -z "$(kubectl get pv --no-headers 2>/dev/null)" ] && break
+      sleep 10
+    done
+  fi
 else
   echo "Cluster $CLUSTER not found: skipping the Kubernetes clean-up."
 fi
@@ -94,6 +105,12 @@ if [ -n "$leftover" ]; then
   aws ec2 terminate-instances --region "$REGION" --instance-ids $leftover >/dev/null
   aws ec2 wait instance-terminated --region "$REGION" --instance-ids $leftover
 fi
+# EBS volumes left by the CSI driver (should be none after the PVC clean-up) still cost money
+vols=$(aws ec2 describe-volumes --region "$REGION" \
+         --filters "Name=tag-key,Values=kubernetes.io/created-for/pvc/name" "Name=status,Values=available" \
+         --query 'Volumes[].VolumeId' --output text)
+for v in $vols; do echo "Deleting leftover EBS volume $v"; aws ec2 delete-volume --region "$REGION" --volume-id "$v"; done
+
 lbs=$(cluster_load_balancers)
 if [ -n "$lbs" ]; then
   echo "Load balancers still exist: $lbs"

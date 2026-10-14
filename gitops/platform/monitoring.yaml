@@ -1,0 +1,131 @@
+# Metrics, dashboards and alerts: kube-prometheus-stack (Prometheus, Alertmanager, Grafana, node-exporter,
+# kube-state-metrics, Prometheus Operator). Logs: loki.yaml + alloy.yaml. Our alerts and dashboards:
+# monitoring-config.yaml → monitoring/.
+# POC: runs on Karpenter Spot nodes (node-role: apps), 2 Gi gp3 volumes, 2 days retention, no external alert receiver.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/prometheus-community/charts
+    chart: kube-prometheus-stack
+    targetRevision: 92.3.1
+    helm:
+      valuesObject:
+        # EKS runs these control-plane components itself: they cannot be scraped, so no targets and no
+        # (always firing) "...Down" alerts for them
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        defaultRules:
+          rules:
+            etcd: false
+            kubeControllerManager: false
+            kubeSchedulerAlerting: false
+            kubeSchedulerRecording: false
+            kubeProxy: false
+
+        prometheusOperator:
+          nodeSelector:
+            node-role: apps
+          admissionWebhooks:
+            patch:
+              nodeSelector:
+                node-role: apps
+
+        kube-state-metrics:
+          nodeSelector:
+            node-role: apps
+          # Expose these node labels as metrics (used by the Karpenter capacity alert and the dashboard)
+          metricLabelsAllowlist:
+            - nodes=[karpenter.sh/nodepool,karpenter.sh/capacity-type,node-role]
+
+        prometheus:
+          prometheusSpec:
+            nodeSelector:
+              node-role: apps
+            retention: 2d
+            retentionSize: 1500MB # stays below the 2 Gi volume
+            # Pick up every PrometheusRule / ServiceMonitor / PodMonitor in the cluster, not only this release's
+            ruleSelectorNilUsesHelmValues: false
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                memory: 1Gi
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 2Gi
+
+        alertmanager:
+          alertmanagerSpec:
+            nodeSelector:
+              node-role: apps
+            retention: 48h
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: gp3
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 2Gi
+
+        grafana:
+          nodeSelector:
+            node-role: apps
+          # Admin login from a Secret created outside Git (README Step 14), never the chart's default password
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
+          persistence:
+            enabled: true
+            storageClassName: gp3
+            size: 2Gi
+          # An EBS volume attaches to one node at a time: stop the old pod before starting the new one
+          # (a rolling update would leave the new pod waiting for the volume: "Multi-Attach error")
+          deploymentStrategy:
+            type: Recreate
+          # Logs next to metrics: Loki (loki.yaml) as a second data source
+          additionalDataSources:
+            - name: Loki
+              type: loki
+              uid: loki
+              url: http://loki.monitoring.svc:3100
+              access: proxy
+              isDefault: false
+          # Dashboards from ConfigMaps labelled grafana_dashboard=1 (ours: monitoring/dashboards/)
+          sidecar:
+            dashboards:
+              enabled: true
+              label: grafana_dashboard
+              labelValue: "1"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # the Prometheus Operator CRDs are very large
