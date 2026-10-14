@@ -11,13 +11,16 @@ What the platform can show, with the real files and names. Status: ✅ shown in 
 | 3 | Infrastructure change with approval | Plan comment → approval gate → apply | ✅ |
 | 4 | Blocked in the cluster: privileged, root, registry, limits | Kyverno admission | ✅ |
 | 5 | Blocked: scale to zero | Kyverno `require-min-replicas` | ⏳ (policy on a branch, after the client demo) |
-| 6 | Blocked in CI: Docker Hub image in values | Kyverno CLI in platform-ci | ⏳ |
+| 6 | Blocked in CI: Docker Hub image in values | Kyverno CLI in platform-ci | ✅ (draft PR `DEMO: CI must fail`) |
 | 7 | Blocked in CI: vulnerable image | Trivy | ✅ (real OpenSSL CVEs) |
-| 8 | Blocked in CI: secret in code | Gitleaks | ⏳ |
-| 9 | Blocked in CI: insecure infrastructure | Checkov | ⏳ |
+| 8 | Blocked in CI: secret in code | Gitleaks | ✅ (draft PRs in both repos) |
+| 9 | Blocked in CI: insecure infrastructure | Checkov | ✅ (draft PR `DEMO: CI must fail`) |
 | 10 | GitOps self-heal | ArgoCD restores drift | ✅ |
 | 11 | Monitoring and alerting | Dashboard, logs, `MyAppDown` | ✅ |
-| 12 | Autoscaling under load | HPA + Karpenter, watched in Grafana | 🔜 (POC item 4) |
+| 12 | Autoscaling under load | HPA + Karpenter, watched in Grafana | ✅ |
+| 13 | All CI gates fail in one PR (both repos) | Every check red; image build skipped | ✅ (kept as draft PRs) |
+
+Running order, timing and talking points for a client: [client-review.md](client-review.md).
 
 `ALB=$(kubectl get ingress my-app -n dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')`
 
@@ -113,7 +116,37 @@ Grafana (port-forward, [runbook](runbook.md#access)) → Dashboards → **my-app
 restarts, Karpenter capacity, logs. Explore → Loki → `{namespace="dev"}`. Alerting → Alert rules → `MyApp`.
 `Watchdog` is always firing on purpose (proves the alert pipeline works).
 
-## 12. Autoscaling under load 🔜
-Being built (POC item 4): a compliant load generator (`demo/load-test.yaml`, image from ECR); watch in Grafana
-(my-app dashboard): CPU above 70 % → HPA adds pods → pending pods → Karpenter adds a Spot node → load stops → pods and
-node removed.
+## 12. Autoscaling under load
+```bash
+kubectl get hpa my-app -n dev -w          # terminal 1
+kubectl get nodeclaims -w                 # terminal 2
+kubectl apply -f demo/load-test.yaml      # terminal 3: 3 generator pods for 10 min
+kubectl logs -n dev -l app.kubernetes.io/name=load-test -f --max-log-requests 3
+kubectl delete -f demo/load-test.yaml     # afterwards (also removes its 2 NetworkPolicies)
+```
+Show in Grafana (my-app dashboard): CPU above 70 % → HPA adds pods (dev: max 10, 200m each) → pods Pending →
+Karpenter adds a Spot node → load stops → pods back to the minimum after ~5 min → empty node removed after ~5 more.
+The generator is compliant (the my-app image from ECR running a script; Kyverno and Pod Security apply) and opens
+generator → my-app:8080 only for the test (dev is default-deny).
+
+## 13. All CI gates fail in one PR
+Draft PRs `DEMO: CI must fail (do not merge)` on branch `demo/ci-failures` in both repos, kept for demos.
+Re-run live with a dummy commit (my-app: append `// demo run` to `src/payment-config.js` instead):
+```bash
+git checkout demo/ci-failures && echo "# demo run $(date +%F-%H%M)" >> demo/ci-failure/payment.env
+git commit -am "DEMO: change while presenting" && git push && git checkout main
+```
+
+| Repo | Planted | Fails |
+|---|---|---|
+| aws-platform | `demo/ci-failure/payment.env` (fake API key) | Gitleaks |
+| aws-platform | `docker.io/library/nginx` in `values-dev.yaml` | Kyverno (`restrict-image-registries`) |
+| aws-platform | `terraform/environments/dev/ci-failure-demo.tf`: SSH from 0.0.0.0/0, unformatted | Checkov (`CKV_AWS_24`), Terraform fmt (also the terraform workflow) |
+| my-app | `src/payment-config.js` (fake API key) | Gitleaks |
+| my-app | `test/demo-failure.test.js` (expects 201 from `/healthz`) | Unit tests |
+| my-app | `lodash@4.17.15` | npm audit, Trivy fs |
+| my-app | `USER root` in the Dockerfile | Trivy fs (misconfiguration) |
+| my-app | – | Build image + Trivy image + Kyverno **skipped**: nothing reaches ECR |
+
+Never merge these PRs: the fake secrets would enter main's history and Gitleaks would fail on main. Close without
+deleting the branch (`gh pr close <n>`) and `gh pr reopen <n>` for the next demo.
