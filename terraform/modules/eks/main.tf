@@ -69,6 +69,13 @@ module "eks" {
     }
     # CPU/memory usage of pods: needed by the HorizontalPodAutoscaler and `kubectl top`
     metrics-server = {}
+    # Creates EBS volumes for PersistentVolumeClaims (monitoring data). AWS access through EKS Pod Identity.
+    aws-ebs-csi-driver = {
+      pod_identity_association = [{
+        role_arn        = aws_iam_role.ebs_csi.arn
+        service_account = "ebs-csi-controller-sa"
+      }]
+    }
   }
 
   eks_managed_node_groups = {
@@ -149,4 +156,23 @@ module "karpenter" {
   }
 
   queue_name = "${var.name}-karpenter"
+}
+# IAM role for the EBS CSI driver's controller (kube-system/ebs-csi-controller-sa), via EKS Pod Identity:
+# create/attach/delete EBS volumes for PersistentVolumeClaims. AWS-managed policy, scoped by AWS to EBS actions.
+resource "aws_iam_role" "ebs_csi" {
+  name        = "${var.name}-ebs-csi"
+  description = "EBS CSI driver controller (EKS Pod Identity)"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.amazonaws.com" }
+      Action    = ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role       = aws_iam_role.ebs_csi.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }
