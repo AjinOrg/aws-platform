@@ -1731,7 +1731,7 @@ my-app, all using one chart.
 | `gitops/apps/my-app.yaml` (AppProject + ApplicationSet `my-app`) | **stays here** as `gitops/apps/microservices.yaml`: AppProject `apps` (now only `helm-chart` as source) + ApplicationSet `microservices` (Git generators over helm-chart: `apps/*` × `environments/*.yaml`) |
 | Helm steps in `platform-ci` | helm-chart `ci.yaml`. `platform-ci` now renders every helm-chart service against the policies of each platform PR, so a policy change cannot silently break a running service |
 | URL `/dev`, IngressGroup `my-app` | URL `/dev/my-app`, IngressGroup `apps` (new ALB address) |
-| one chart version for all environments | dev runs helm-chart `main`; staging/production pin a `chart-v*` tag |
+| one chart version for all environments | dev runs helm-chart `main` (git); staging/production pin a released version, deployed from the package `ghcr.io/ajinorg/charts/microservice` (registered in `gitops/platform/repositories.yaml`) |
 
 Kept here: policies (helm-chart CI reads them), namespaces, monitoring (`monitoring/` alerts and dashboard for
 my-app), AWS roles (`helm-chart-readonly` added to `bootstrap/state-backend.yaml`).
@@ -1745,6 +1745,7 @@ my-app), AWS roles (`helm-chart-readonly` added to `bootstrap/state-backend.yaml
 | 2 | helm-chart | Image tags re-synced from aws-platform (a dev deploy had happened in between); my-app merges frozen |
 | 2 | aws-platform PR B | `microservices.yaml` replaces `my-app.yaml`; chart, values, release/verify removed; CI, CODEOWNERS, ruleset check name, docs updated |
 | 3 | my-app | Pipeline opens the dev PR in helm-chart; its Kyverno check renders the helm-chart chart |
+| fix | helm-chart + aws-platform PR C | Staging/production failed with "cannot reference a different revision of the same repository" (chart from git tag `chart-v0.1.0`, values from `main` of the same repository). Chart versions are now also published to `ghcr.io/ajinorg/charts` (public package); the ApplicationSet takes the chart from there when `chartRevision` is a version; `environments/*.yaml` use `0.1.0` instead of `chart-v0.1.0` |
 
 Why the ApplicationSet swap is safe: the new ApplicationSet generates Applications with the **same names**
 (`my-app-dev`, …), the same release name and namespaces, so it adopts the running objects. Only the chart label,
