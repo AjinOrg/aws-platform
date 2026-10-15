@@ -20,10 +20,15 @@ gitops/
 │   ├── karpenter/             EC2NodeClass + NodePool
 │   ├── external-secrets/      ClusterSecretStore
 │   └── namespaces/            dev, staging, production + default-deny network policies
-└── apps/                      the application (Day 5)
-    ├── my-app.yaml            Application(s) for dev / staging / production
-    └── my-app/values-*.yaml   per-environment values; the image tag is updated by the app pipeline
+└── apps/
+    └── microservices.yaml     AppProject "apps" (where services may run) + ApplicationSet "microservices":
+                               one Application per service and environment, chart and values read from
+                               AjinOrg/helm-chart (release team)
 ```
+
+Service charts, values, image tags and releases are **not** in this repository: they are in
+[AjinOrg/helm-chart](https://github.com/AjinOrg/helm-chart). This repository only decides where they may run
+(namespaces, allowed object kinds, policies).
 
 | Rule | Why |
 |---|---|

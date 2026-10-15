@@ -74,7 +74,7 @@ spec:
         - name: generator
           image: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app:d521095 # the image dev runs (ECR, pinned)
           env:
-            - { name: TARGET, value: "http://my-app.dev.svc.cluster.local/dev" }
+            - { name: TARGET, value: "http://my-app.dev.svc.cluster.local/dev/my-app" }
             - { name: CONCURRENCY, value: "64" } # open requests per pod, on kept-alive connections
             - { name: DURATION_SECONDS, value: "600" }
           # The image's entrypoint is node; "-e" runs this script instead of the app

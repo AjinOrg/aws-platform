@@ -4,8 +4,15 @@ The **infrastructure (platform) repository** for the Secure Production-Ready AWS
 (design: `aws-platform-docs/output/AWS_Platform_Proposal_v1.6.docx`).
 
 It holds everything needed to build and run the platform: AWS infrastructure, Kubernetes add-ons,
-deployment settings, security rules and monitoring. The application code lives in a separate
-repository, **`my-app`**.
+security rules and monitoring. Owned by the **infra team**.
+
+| Repository | Owner | Contains |
+|---|---|---|
+| `aws-platform` (this one) | Infra team | AWS (Terraform), cluster add-ons, namespaces, policies, monitoring, where services may run (AppProject + ApplicationSet) |
+| [`helm-chart`](https://github.com/AjinOrg/helm-chart) | Release team | One shared Helm chart, values per service and environment, release and smoke-test workflows |
+| `my-app` (one repository per service) | Developers | Service code, tests, Dockerfile, build pipeline |
+
+Until 2026-10-15 the chart and its values were in this repository; Step 16 moved them to `helm-chart`.
 
 ## Table of Contents
 1. [What Will Live Here](#1-what-will-live-here)
@@ -26,6 +33,8 @@ repository, **`my-app`**.
     - [Step 12: Kyverno in the Cluster](#10g-step-12-kyverno-in-the-cluster-policy-enforcement-at-admission)
     - [Step 13: Terraform Pipeline](#10h-step-13-terraform-pipeline-infrastructure-through-pull-requests)
     - [Step 14: Monitoring](#10i-step-14-monitoring-metrics-logs-alerts-dashboards)
+    - [Step 15: Load Test and CI Failure Demos](#10j-step-15-load-test-and-ci-failure-demos)
+    - [Step 16: Charts and Values Move to helm-chart](#10k-step-16-charts-and-values-move-to-helm-chart)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -42,12 +51,12 @@ Folders are added step by step as the build progresses.
 | `bootstrap/` | One-time CloudFormation template: Terraform state bucket, KMS key, GitHub login trust and pipeline roles | Day 1 |
 | `terraform/modules/` | Reusable building blocks: `vpc`, `eks`, `ecr`, `iam`, `secrets` | Days 1–2 |
 | `terraform/environments/` | Settings per environment: `dev` (POC); `staging`, `production` in the production-grade phase | Days 1–3 |
-| `gitops/` | What ArgoCD installs: platform add-ons and the app's settings per environment | Days 3–5 |
-| `helm/my-app/` | How the application is packaged for Kubernetes | Day 5 |
+| `gitops/` | What ArgoCD installs: platform add-ons; where services may run (`apps/microservices.yaml`) | Days 3–5, Step 16 |
+| ~~`helm/my-app/`~~ | Moved to `AjinOrg/helm-chart` (`charts/microservice`, shared by all services) in Step 16 | Day 5 |
 | `policies/kyverno/` | Security rules: checked in CI and enforced in the cluster (Kyverno) | Day 6, Step 12 |
 | `monitoring/` | Alert rules (PrometheusRule) and Grafana dashboards, as code | Step 14 |
 | `demo/` | Deliberately bad files (must be rejected), the load test (`load-test.yaml`) | Days 6, 8, Step 15 |
-| `.github/workflows/` | Pipelines: platform checks, release/verify, Terraform | Day 6, Steps 11, 13 |
+| `.github/workflows/` | Pipelines: platform checks, Terraform (release/verify moved to helm-chart in Step 16) | Day 6, Steps 11, 13 |
 | `docs/` | How-it-works guides (Karpenter and External Secrets); as-built architecture, decisions, trade-offs, runbook, demo scenarios, client review run sheet (POC item 6) | Days 4, 10 |
 
 ### Terraform modules: ours and community
@@ -937,6 +946,10 @@ kubectl run np-test -n dev --rm -it --restart=Never --image=public.ecr.aws/docke
 
 ## 10d. Step 9: The Application (Day 5)
 
+> **Historical (Day 5).** Since [Step 16](#10k-step-16-charts-and-values-move-to-helm-chart) the chart, the values
+> files, `release.yaml`, `verify.yaml` and `scripts/release.sh` are in `AjinOrg/helm-chart`, and URLs are
+> `/<env>/<service>` (e.g. `/dev/my-app`). This section records how it was first built.
+
 Two repositories, as in the design: **code** in `AjinOrg/my-app`, **how it runs** in `AjinOrg/aws-platform`.
 
 ```
@@ -1118,6 +1131,11 @@ Branch protection (rulesets), the GitHub App, SonarQube Cloud and the NVD key ar
 ---
 
 ## 10f. Step 11: Continuous Delivery (dev → staging → production)
+
+> **Historical (Step 11).** The flow is unchanged, but since [Step 16](#10k-step-16-charts-and-values-move-to-helm-chart)
+> deployment PRs, `release.yaml`, `verify.yaml` and `scripts/release.sh` live in `AjinOrg/helm-chart` and take a
+> service name. Setups 1, 3 and 4 below still apply to `aws-platform` and `my-app`; helm-chart has its own setup in
+> its README.
 
 **Principle: approve releases, not commits.** Every check runs on every change. Dev follows every commit
 automatically; staging and production move only when a person **chooses a tested tag and starts the release**.
@@ -1697,6 +1715,56 @@ down can be shown in the client review; merged afterwards.
 
 ---
 
+## 10k. Step 16: Charts and Values Move to helm-chart
+
+**Why (management review, 2026-10-15):** each team should own only its part. Infra team: `aws-platform`. Release
+team: how services run (chart, values, releases). Developers: service code. Several microservices will follow
+my-app, all using one chart.
+
+**What moved, what stayed**
+
+| Before (aws-platform) | After |
+|---|---|
+| `helm/my-app/` | helm-chart `charts/microservice/`: one generic chart; names, URL path, secret name and mount path come from the service (folder) name |
+| `gitops/apps/my-app/values-<env>.yaml` | helm-chart `apps/my-app/values.yaml` + `values-<env>.yaml` |
+| `.github/workflows/release.yaml`, `verify.yaml`, `scripts/release.sh` | helm-chart, with a service input |
+| `gitops/apps/my-app.yaml` (AppProject + ApplicationSet `my-app`) | **stays here** as `gitops/apps/microservices.yaml`: AppProject `apps` (now only `helm-chart` as source) + ApplicationSet `microservices` (Git generators over helm-chart: `apps/*` × `environments/*.yaml`) |
+| Helm steps in `platform-ci` | helm-chart `ci.yaml`. `platform-ci` now renders every helm-chart service against the policies of each platform PR, so a policy change cannot silently break a running service |
+| URL `/dev`, IngressGroup `my-app` | URL `/dev/my-app`, IngressGroup `apps` (new ALB address) |
+| one chart version for all environments | dev runs helm-chart `main`; staging/production pin a `chart-v*` tag |
+
+Kept here: policies (helm-chart CI reads them), namespaces, monitoring (`monitoring/` alerts and dashboard for
+my-app), AWS roles (`helm-chart-readonly` added to `bootstrap/state-backend.yaml`).
+
+**How it was done** (no downtime of the pods; the URL moved once)
+
+| Phase | Where | What |
+|---|---|---|
+| 1 | helm-chart | Repository created (chart, my-app values, workflows, rulesets, GitHub App access, tag `chart-v0.1.0`) |
+| 1 | aws-platform PR A | AppProject `apps` may also read helm-chart; ApplicationSet `my-app`: `preserveResourcesOnDeletion: true` and no finalizer on its Applications, so removing it leaves the running app untouched; bootstrap role `helm-chart-readonly` (CloudFormation change set with `HelmChartRepoId`) |
+| 2 | helm-chart | Image tags re-synced from aws-platform (a dev deploy had happened in between); my-app merges frozen |
+| 2 | aws-platform PR B | `microservices.yaml` replaces `my-app.yaml`; chart, values, release/verify removed; CI, CODEOWNERS, ruleset check name, docs updated |
+| 3 | my-app | Pipeline opens the dev PR in helm-chart; its Kyverno check renders the helm-chart chart |
+
+Why the ApplicationSet swap is safe: the new ApplicationSet generates Applications with the **same names**
+(`my-app-dev`, …), the same release name and namespaces, so it adopts the running objects. Only the chart label,
+the IngressGroup and the path change; the pod selector labels do not, so Deployments roll, they are not recreated.
+
+**Verify after PR B**
+```bash
+kubectl get applicationset -n argocd                         # microservices (my-app is gone)
+kubectl get applications -n argocd | grep my-app             # my-app-dev/staging/production Synced Healthy
+kubectl get ingress -n dev                                   # ADDRESS k8s-apps-…
+ALB=$(kubectl get ingress my-app -n dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+for e in dev staging production; do curl -s http://$ALB/$e/my-app | jq -c '{environment,version}'; done
+aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName' --output text   # old k8s-myapp-… gone
+```
+**Rollback** (before Phase 3): revert PR B. `microservices` has `preserveResourcesOnDeletion: true`, so removing it
+leaves the running objects alone; the old ApplicationSet returns and recreates the Applications. Check afterwards
+with `kubectl get pods -n dev` (pods never stop) and `kubectl get applications -n argocd`.
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1745,6 +1813,7 @@ Tick each item as it is done.
 - [x] Kyverno in the cluster: 6 policies enforced at admission; all 4 demo Deployments rejected (Step 12)
 - [ ] Planned: pipeline caching (Docker layers, Trivy DB) (see "Pipeline speed" in Step 11)
 - [x] Lighter main run (build, Trivy image, Kyverno, push) + "branch must be up to date" rule on my-app (main run ~1 min instead of ~2–2.5 min); merge queue later when the team merges many times a day
+- [x] Step 16 (2026-10-15/16): charts, values and releases moved to `AjinOrg/helm-chart` (release team); one shared chart for all microservices, chart versions pinned per environment; URLs `/<env>/<service>`
 
 ### POC scope: remaining work (agreed 2026-10-13)
 The POC is complete with the items below. Production-grade work starts only after the POC is accepted.
