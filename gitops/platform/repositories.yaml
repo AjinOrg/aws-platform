@@ -75,3 +75,20 @@ stringData:
   type: helm
   url: ghcr.io/grafana/helm-charts
   enableOCI: "true"
+---
+# Our own chart packages (AjinOrg/helm-chart publishes them; public package): the shared microservice chart that
+# staging and production pin. Used by project "apps", not "platform".
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-ajinorg-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+stringData:
+  name: ajinorg-charts
+  type: helm
+  url: ghcr.io/ajinorg/charts
+  enableOCI: "true"

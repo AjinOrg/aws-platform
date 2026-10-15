@@ -176,7 +176,13 @@ infra team still decides where services may run; the release team decides what r
 
 ## 29. One shared chart for all services, versions pinned per environment
 **Decision:** `charts/microservice` in helm-chart serves every service (values per service and environment); no
-umbrella chart. Each chart change is tagged `chart-v<version>`; dev runs `main`, staging and production pin a tag in
-`environments/<env>.yaml`. **Why:** services release and roll back independently (one Application each); a chart
-change cannot reach production before it ran in dev and staging. **Alternative:** umbrella chart (all services of an
-environment as one release). **Not chosen:** one service's change or rollback would re-release all of them.
+umbrella chart. Each chart change is released as a version: git tag `chart-v<version>` plus the package
+`oci://ghcr.io/ajinorg/charts/microservice:<version>`; dev runs `main` from git, staging and production pin a
+version in `environments/<env>.yaml` and get the package. **Why:** services release and roll back independently (one
+Application each); a chart change cannot reach production before it ran in dev and staging. **Alternative:** umbrella
+chart (all services of an environment as one release). **Not chosen:** one service's change or rollback would
+re-release all of them.
+**Why a package, not the git tag (found 2026-10-16):** the first design pinned the git tag. ArgoCD refused it:
+"cannot reference a different revision of the same repository" — a multi-source Application cannot take the chart
+from one revision of a repository and `$values` from another revision of the same repository. The package is a
+separate source, so chart (pinned) and values (main) combine.

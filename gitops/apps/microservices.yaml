@@ -18,7 +18,8 @@ metadata:
 spec:
   description: Application workloads (charts and values owned by the release team in AjinOrg/helm-chart)
   sourceRepos:
-    - https://github.com/AjinOrg/helm-chart.git
+    - https://github.com/AjinOrg/helm-chart.git # values (all environments), chart for dev (main)
+    - ghcr.io/ajinorg/charts # released chart versions for staging/production (published by helm-chart)
   destinations:
     - server: https://kubernetes.default.svc
       namespace: dev
@@ -73,10 +74,15 @@ spec:
     spec:
       project: apps
       sources:
-        # The shared chart, at the version this environment pins...
-        - repoURL: https://github.com/AjinOrg/helm-chart.git
+        # The shared chart, at the version this environment pins (environments/<env>.yaml in helm-chart):
+        #   chartRevision "main"   → git, charts/microservice on main (dev: newest chart)
+        #   chartRevision "0.1.0"  → OCI package ghcr.io/ajinorg/charts/microservice:0.1.0 (staging, production)
+        # Not a git tag: ArgoCD cannot combine a chart from one revision of a repository with values ($values)
+        # from another revision of the same repository; the package is a separate source.
+        - repoURL: '{{ if eq .chartRevision "main" }}https://github.com/AjinOrg/helm-chart.git{{ else }}ghcr.io/ajinorg/charts{{ end }}'
           targetRevision: "{{ .chartRevision }}"
-          path: charts/microservice
+          path: '{{ if eq .chartRevision "main" }}charts/microservice{{ end }}'
+          chart: '{{ if ne .chartRevision "main" }}microservice{{ end }}'
           helm:
             releaseName: "{{ .app.path.basename }}" # the chart names every object after the release
             valueFiles:
