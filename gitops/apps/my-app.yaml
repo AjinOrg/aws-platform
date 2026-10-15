@@ -14,6 +14,7 @@ spec:
   description: Application workloads
   sourceRepos:
     - https://github.com/AjinOrg/aws-platform.git
+    - https://github.com/AjinOrg/helm-chart.git # migration: charts and values move there (release team)
   destinations:
     - server: https://kubernetes.default.svc
       namespace: dev
@@ -45,11 +46,13 @@ spec:
           - env: dev
           - env: staging
           - env: production
+  # Migration to AjinOrg/helm-chart: this ApplicationSet is about to be replaced by "microservices".
+  # Removing it must leave the running app untouched: no cascade, and no finalizer on its Applications.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
   template:
     metadata:
       name: "my-app-{{ .env }}"
-      finalizers:
-        - resources-finalizer.argocd.argoproj.io # deleting the Application removes the app (and its ALB rule)
     spec:
       project: apps
       sources:
