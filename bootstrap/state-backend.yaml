@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   aws-platform bootstrap (one time per AWS account): Terraform state bucket, its KMS key,
-  GitHub OIDC provider and the pipeline roles (ECR push, Terraform plan, Terraform apply).
+  GitHub OIDC provider and the pipeline roles (ECR push, Terraform plan, Terraform apply, helm-chart read-only).
 
 Parameters:
   StateBucketName:
@@ -50,10 +50,23 @@ Parameters:
     Default: ""
     AllowedPattern: "^[0-9]*$"
     Description: Numeric ID of the platform repository
+  HelmChartRepo:
+    Type: String
+    Default: helm-chart
+    Description: Repository of the release team (shared Helm chart + values of every service)
+  HelmChartRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric ID of the helm-chart repository (with the immutable subject, the role is created only once this is set)
 
 Conditions:
   CreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
   ImmutableSubject: !Not [!Equals [!Ref GitHubOrgId, ""]]
+  # Classic subject: always. Immutable subject: only when the repository ID is known (repository created)
+  CreateHelmChartRole: !Or
+    - !Not [!Condition ImmutableSubject]
+    - !Not [!Equals [!Ref HelmChartRepoId, ""]]
 
 Resources:
   # ---------------------------------------------------------------- state storage
@@ -252,6 +265,45 @@ Resources:
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess"
         - !Ref StateAccessPolicy
+
+  # helm-chart repository (release team): release.yaml checks a tag exists in ECR, verify.yaml finds the shared
+  # load balancer. Read-only and limited to exactly that - no Terraform state, no ReadOnlyAccess.
+  HelmChartReadOnlyRole:
+    Type: AWS::IAM::Role
+    Condition: CreateHelmChartRole
+    Properties:
+      RoleName: helm-chart-readonly
+      Description: helm-chart release/verify workflows (main branch only) - describe ECR images and the ALB
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "${Repo}:ref:refs/heads/main"
+                  - Repo: !If
+                      - ImmutableSubject
+                      - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${HelmChartRepo}@${HelmChartRepoId}"
+                      - !Sub "repo:${GitHubOrg}/${HelmChartRepo}"
+      Policies:
+        - PolicyName: release-checks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow # every service's ECR repository (one per service)
+                Action: ecr:DescribeImages
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/*"
+              - Effect: Allow # these two actions do not support resource-level permissions
+                Action:
+                  - tag:GetResources
+                  - elasticloadbalancing:DescribeLoadBalancers
+                Resource: "*"
 
 Outputs:
   StateBucketName:
