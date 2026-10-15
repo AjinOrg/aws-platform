@@ -52,9 +52,9 @@ marked **(POC)** and listed in [trade-offs.md](trade-offs.md). Diagrams of the d
 User (browser)
    │ HTTP :80  (POC: no domain → no TLS; HTTPS = ACM certificate + 2 Ingress annotations)
    ▼
-Application Load Balancer  k8s-myapp-…elb.amazonaws.com    public subnets, 3 AZs
-   │ ONE ALB shared by dev, staging, production (IngressGroup "my-app") (POC: cost)
-   │ path /dev → dev · /staging → staging · /production → production · health check /readyz
+Application Load Balancer  k8s-apps-…elb.amazonaws.com      public subnets, 3 AZs
+   │ ONE ALB shared by every service and environment (IngressGroup "apps") (POC: cost)
+   │ path /<env>/<service>: /dev/my-app → dev · /staging/my-app → staging · … · health check /readyz
    ▼  target type ip: straight to pod IPs (allowed by NetworkPolicy from 10.0.96.0/22 on 8080)
 my-app pods   private subnets, Karpenter Spot nodes (node-role=apps)
    │ secrets as files: /etc/my-app/secrets/<KEY>  ← Kubernetes Secret ← External Secrets ← Secrets Manager
@@ -114,29 +114,32 @@ EKS platform-dev (Kubernetes 1.36, control plane managed by AWS)
 
 | Repository | Contains | Who |
 |---|---|---|
-| `AjinOrg/my-app` | Application code, tests, Dockerfile, its pipeline | Developers (Write) |
-| `AjinOrg/aws-platform` | Bootstrap, Terraform, Helm chart, GitOps, policies, monitoring, docs, workflows | Platform team (Code Owners) |
+| `AjinOrg/my-app` (one repo per service) | Application code, tests, Dockerfile, its pipeline | Developers (Write) |
+| `AjinOrg/helm-chart` | One shared chart (`charts/microservice`), values per service and environment, release/verify workflows | Release team (Code Owners) |
+| `AjinOrg/aws-platform` | Bootstrap, Terraform, GitOps (add-ons, AppProject + ApplicationSet for services), policies, monitoring, docs | Infra team (Code Owners) |
 
 ```
 my-app PR ── checks: Gitleaks · lint+tests+coverage · SonarQube (Phase 2) · npm audit/OWASP · Trivy fs
-             · build · Trivy image · Kyverno  (branch must be up to date with main)
+             · build · Trivy image · Kyverno (helm-chart chart + values, aws-platform policies)
    │ merge
    ▼
 my-app main ── build · Trivy image · Kyverno · OIDC → ECR push (tag = 7-char SHA)
-             · GitHub App → PR "deploy(dev)" in aws-platform
+             · GitHub App → PR "deploy(dev): my-app <sha>" in helm-chart
    ▼
-DEV        platform-ci green → PR merges ITSELF → ArgoCD (polls every 60 s) → verify.yaml smoke test
-   │ a person: release.yaml (form) or scripts/release.sh (menu) — tag must have run in dev
+DEV        helm-chart ci green → PR merges ITSELF → ArgoCD (polls every 60 s) → verify.yaml smoke test
+   │ a person: helm-chart release.yaml (form) or scripts/release.sh (menu) — tag must have run in dev
    ▼
-STAGING    release PR → platform-ci → merges itself → ArgoCD → verify.yaml
+STAGING    release PR → ci → merges itself → ArgoCD → verify.yaml
    │ a person: release → production — tag must have run in staging
    ▼
-PRODUCTION release PR → platform-ci → Code Owner APPROVES → ArgoCD → verify.yaml
+PRODUCTION release PR → ci → Code Owner APPROVES → ArgoCD → verify.yaml
 ```
 
-ArgoCD watches only `aws-platform`. App-of-apps: `gitops/bootstrap/root-app.yaml` → `gitops/platform/*.yaml`
-(add-ons, project `platform`) and `gitops/apps/*.yaml` (ApplicationSet `my-app` → 3 Applications, project `apps`).
-Details: [delivery-flow in README §10f](../README.md#10f-step-11-continuous-delivery-dev--staging--production).
+App-of-apps: `gitops/bootstrap/root-app.yaml` → `gitops/platform/*.yaml` (add-ons, project `platform`) and
+`gitops/apps/microservices.yaml`: AppProject `apps` + ApplicationSet `microservices`, which reads
+`AjinOrg/helm-chart` and creates one Application per service and environment (`apps/<service>/` ×
+`environments/<env>.yaml`). The chart version per environment is pinned in helm-chart (`environments/<env>.yaml`:
+dev = `main`, staging/production = a `chart-v*` tag). Details: the helm-chart README.
 
 ---
 
@@ -210,7 +213,8 @@ Our alerts: `MyAppDown`, `MyAppHPAAtMax`, `MyAppHighRestarts`, `KarpenterNodePoo
 | Where (POC) | Namespace in `platform-dev` | Namespace in `platform-dev` | Namespace in `platform-dev` |
 | HPA min / max | 1 / 3 | 2 / 6 | 3 / 20 |
 | Secret | `platform-dev/my-app/dev` | `…/staging` | `…/production` |
-| URL | `http://<alb>/dev` | `/staging` | `/production` |
+| URL | `http://<alb>/dev/my-app` | `/staging/my-app` | `/production/my-app` |
+| Chart version | `main` (newest) | pinned `chart-v*` tag | pinned `chart-v*` tag |
 | Deployment | Automatic on every my-app merge | Released on purpose | Released on purpose + approval |
 
 Production-grade phase: dedicated staging/production clusters (VPCs `10.1.0.0/16`, `10.2.0.0/16` reserved) from the

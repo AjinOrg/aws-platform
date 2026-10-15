@@ -124,8 +124,10 @@ environment, mounted secret and 20 requests. **Why:** "deployed" is proven, not 
 the read-only role (its address changes on every rebuild).
 
 ## 19. One shared load balancer, path-based
-**Decision:** IngressGroup `my-app`: one ALB for dev/staging/production (`/dev`, `/staging`, `/production`).
-**Why:** one ALB instead of three (cost); no domain, so host-based routing is not possible. HTTPS later.
+**Decision:** IngressGroup `apps`: one ALB for every service and environment, path `/<env>/<service>`
+(e.g. `/dev/my-app`). Until 2026-10-15: IngressGroup `my-app` with `/dev`, `/staging`, `/production`.
+**Why:** one ALB instead of one per service and environment (cost); no domain, so host-based routing is not
+possible. HTTPS later.
 
 ## 20. Helm charts over OCI
 **Decision:** ArgoCD, Karpenter, External Secrets, Kyverno, kube-prometheus-stack and Loki charts from OCI
@@ -164,3 +166,17 @@ reachable from GitHub (Phase 2).
 ## 27. Two system nodes kept
 **Decision:** 2 × t3.medium, not 1. **Why:** 1 node saves ~$1.10/day but Karpenter's 2nd replica cannot schedule and
 ArgoCD/Karpenter/ALB controller share one point of failure; stop/start saves far more.
+
+## 28. Service charts and values in their own repository (`AjinOrg/helm-chart`)
+**Decision (2026-10-15, after the management review):** three repositories, three owners: infrastructure and
+guardrails (`aws-platform`, infra team), how services run (`helm-chart`, release team), service code (`my-app` and
+future services, developers). `aws-platform` keeps the AppProject `apps` and the ApplicationSet `microservices`, so the
+infra team still decides where services may run; the release team decides what runs.
+**Why:** each team changes only what it owns; release work no longer needs platform approvals.
+
+## 29. One shared chart for all services, versions pinned per environment
+**Decision:** `charts/microservice` in helm-chart serves every service (values per service and environment); no
+umbrella chart. Each chart change is tagged `chart-v<version>`; dev runs `main`, staging and production pin a tag in
+`environments/<env>.yaml`. **Why:** services release and roll back independently (one Application each); a chart
+change cannot reach production before it ran in dev and staging. **Alternative:** umbrella chart (all services of an
+environment as one release). **Not chosen:** one service's change or rollback would re-release all of them.

@@ -26,7 +26,7 @@
         "required_status_checks": [
           { "context": "Secrets scan (Gitleaks)" },
           { "context": "Terraform fmt + validate" },
-          { "context": "Helm lint + kubeconform + Kyverno" },
+          { "context": "Manifests (kubeconform + Kyverno)" },
           { "context": "IaC security scan (Checkov)" }
         ]
       }

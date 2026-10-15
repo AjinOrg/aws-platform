@@ -34,19 +34,19 @@ git commit -am "demo: visible change" && git push -u origin demo/change
 gh pr create --fill && gh pr checks --watch        # Gitleaks, tests, deps, Trivy fs, build+Trivy image+Kyverno
 gh pr merge --squash --delete-branch
 gh run watch -R AjinOrg/my-app                     # main: build → ECR → "Dev deployment PR opened"
-gh pr list -R AjinOrg/aws-platform --state all --limit 2   # deploy(dev): … merged by ajinorg-deployer[bot]
-curl -s http://$ALB/dev                            # new version
+gh pr list -R AjinOrg/helm-chart --state all --limit 2     # deploy(dev): … merged by ajinorg-deployer[bot]
+curl -s http://$ALB/dev/my-app                     # new version
 ```
-Show: the PR checks, the bot's PR merging itself, `verify.yaml` ✅, the new version on `/dev` while staging and
-production still run the old one.
+Show: the PR checks, the bot's PR merging itself, `verify.yaml` ✅, the new version on `/dev/my-app` while staging
+and production still run the old one.
 
 ## 2. Release to staging and production
 ```bash
-cd ~/workspace/Task/aws-platform && bash scripts/release.sh   # staging → pick the tag → type "staging"
-curl -s http://$ALB/staging
-bash scripts/release.sh                                       # production → pick → type "production"
-gh pr review <n> -R AjinOrg/aws-platform --approve && gh pr merge <n> -R AjinOrg/aws-platform --squash
-curl -s http://$ALB/production
+cd ~/workspace/Task/helm-chart && bash scripts/release.sh     # my-app → staging → pick the tag → type "staging"
+curl -s http://$ALB/staging/my-app
+bash scripts/release.sh                                       # my-app → production → pick → type "production"
+gh pr review <n> -R AjinOrg/helm-chart --approve && gh pr merge <n> -R AjinOrg/helm-chart --squash
+curl -s http://$ALB/production/my-app
 ```
 Show: the tag list (only tags that ran in the previous environment), the production PR waiting for approval.
 Also: Actions → release → Run workflow with tag `abcdef1` → refused ("never ran in dev").
@@ -78,11 +78,12 @@ Why it matters: replicas are owned by the HPA (not in Git), so ArgoCD would not 
 scale up from 0 ([decision 23](decisions.md#23-replicas-owned-by-the-hpa-scale-to-zero-blocked-by-kyverno)).
 
 ## 6. Blocked in CI: Docker Hub image in values
+Values live in AjinOrg/helm-chart; its CI applies the platform's Kyverno policies.
 ```bash
-git checkout -b test/kyverno-ci-block
-sed -i '/^image:$/a\  repository: docker.io/library/nginx' gitops/apps/my-app/values-dev.yaml
+cd ~/workspace/Task/helm-chart && git checkout main && git pull && git checkout -b test/kyverno-ci-block
+sed -i '/^image:$/a\  repository: docker.io/library/nginx' apps/my-app/values-dev.yaml
 git commit -am "test: Docker Hub image" && git push -u origin test/kyverno-ci-block && gh pr create --fill
-gh pr checks --watch     # "Helm lint + kubeconform + Kyverno" ✗ restrict-image-registries → merge blocked
+gh pr checks --watch     # "Render + kubeconform + Kyverno" ✗ restrict-image-registries → merge blocked
 gh pr close test/kyverno-ci-block --delete-branch
 ```
 
@@ -140,7 +141,7 @@ git commit -am "DEMO: change while presenting" && git push && git checkout main
 | Repo | Planted | Fails |
 |---|---|---|
 | aws-platform | `demo/ci-failure/payment.env` (fake API key) | Gitleaks |
-| aws-platform | `docker.io/library/nginx` in `values-dev.yaml` | Kyverno (`restrict-image-registries`) |
+| aws-platform | `docker.io/library/nginx` in `values-dev.yaml` | Kyverno (`restrict-image-registries`). Since the move to helm-chart this file no longer exists on main: replay this row in helm-chart (scenario 6) |
 | aws-platform | `terraform/environments/dev/ci-failure-demo.tf`: SSH from 0.0.0.0/0, unformatted | Checkov (`CKV_AWS_24`), Terraform fmt (also the terraform workflow) |
 | my-app | `src/payment-config.js` (fake API key) | Gitleaks |
 | my-app | `test/demo-failure.test.js` (expects 201 from `/healthz`) | Unit tests |

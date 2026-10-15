@@ -53,7 +53,7 @@ jobs:
           done
 
   manifests:
-    name: Helm lint + kubeconform + Kyverno
+    name: Manifests (kubeconform + Kyverno)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,25 +61,27 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
       - run: bash .github/scripts/install-ci-tools.sh kubeconform kyverno
-      - name: helm lint
-        run: helm lint helm/my-app --set image.tag=ci
-      - name: render the chart for every environment
-        run: |
-          mkdir -p rendered
-          for env in dev staging production; do
-            helm template my-app helm/my-app -n "$env" -f "gitops/apps/my-app/values-$env.yaml" > "rendered/$env.yaml"
-          done
       - name: kubeconform (Kubernetes + CRD schemas)
         # ClusterSecretStore v1 has no schema in the public CRD catalog yet; it is skipped (only that kind)
         run: |
           kubeconform -strict -summary -skip ClusterSecretStore \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            rendered/ gitops/platform/ gitops/platform-config/ gitops/apps/my-app.yaml gitops/bootstrap/root-app.yaml
-      - name: Kyverno policies accept the chart
+            gitops/platform/ gitops/platform-config/ gitops/apps/ gitops/bootstrap/root-app.yaml
+      # The services' charts and values live in AjinOrg/helm-chart (release team). A policy change here must not
+      # break what already runs: render every service in every environment and apply the policies of THIS PR.
+      - name: services from AjinOrg/helm-chart (read-only copy)
+        uses: actions/checkout@v4
+        with:
+          repository: AjinOrg/helm-chart
+          path: helm-chart
+          fetch-depth: 0 # the chart-v* tags pinned by staging/production
+      - name: Kyverno policies accept every service
         run: |
-          for env in dev staging production; do
-            kyverno apply policies/kyverno --resource "rendered/$env.yaml"
+          bash helm-chart/scripts/render-all.sh "$PWD/rendered"
+          for f in rendered/*.yaml; do
+            echo "== $f"
+            kyverno apply policies/kyverno --resource "$f"
           done
       - name: Kyverno policies reject every demo file
         run: |
@@ -95,18 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: ${{ env.HELM_VERSION }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install --quiet "checkov==${CHECKOV_VERSION}"
-      - name: render the chart
-        run: |
-          mkdir -p rendered
-          for env in dev staging production; do
-            helm template my-app helm/my-app -n "$env" -f "gitops/apps/my-app/values-$env.yaml" > "rendered/$env.yaml"
-          done
+      # The rendered services are scanned in AjinOrg/helm-chart (its own ci.yaml and .checkov.yaml)
       - name: checkov (skipped checks and reasons are in .checkov.yaml)
-        run: checkov --config-file .checkov.yaml -d terraform -d bootstrap -d rendered
+        run: checkov --config-file .checkov.yaml -d terraform -d bootstrap
