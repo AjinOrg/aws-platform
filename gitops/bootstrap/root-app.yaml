@@ -20,7 +20,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  # ArgoCD itself adds pre-delete finalizers to an Application whose chart has a pre-delete hook (Kyverno:
+  # webhooksCleanup), so the hook runs before an uninstall. They are not in Git: ignore only those, or root
+  # shows OutOfSync and self-heal keeps removing what ArgoCD keeps adding.
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jqPathExpressions:
+        - .metadata.finalizers[]? | select(startswith("pre-delete-finalizer.argocd.argoproj.io"))
   syncPolicy:
     automated:
       prune: true    # a file removed from Git = Application removed from the cluster
       selfHeal: true # manual changes in the cluster are reverted to what Git says
+    syncOptions:
+      - RespectIgnoreDifferences=true # a sync must not remove the ignored finalizers either
