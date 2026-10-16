@@ -2085,31 +2085,35 @@ cd ~/workspace/Task/aws-platform
 export AWS_PROFILE=task AWS_REGION=ap-south-1
 
 bash scripts/platform-status.sh     # running or stopped? what is costing money? (read-only)
-bash scripts/platform-stop.sh       # ~15–20 min, asks twice before deleting anything
+bash scripts/platform-stop.sh       # ~15–20 min, asks twice before deleting anything; keeps images and secrets
 bash scripts/platform-start.sh      # ~25–30 min, shows the Terraform plan and asks before applying
+bash scripts/platform-stop.sh --all # end of the POC only: also deletes the ECR images and the secret values
 ```
 
 | Script | What it does, in order |
 |---|---|
-| `platform-stop.sh` | 1. Checks the AWS account; you type `stop`. 2. Deletes the ArgoCD root app (so nothing is re-created), then the other applications: the load balancer controller removes ALBs for deleted Ingresses, Karpenter removes its nodes. 3. Waits until no ALBs or Karpenter nodes remain (they are not in Terraform and would block the VPC deletion). 4. Uninstalls ArgoCD. 5. `terraform plan -destroy`, you type `yes`, destroy. Removes the EKS log group if EKS re-created it |
-| `platform-start.sh` | 1. Checks the account and that your public IP is in `admin_cidrs`. 2. `terraform plan`, you type `yes`, apply. 3. Connects kubectl, waits for the nodes. 4. Installs ArgoCD (Helm), applies `root-app.yaml`, waits until every application is Synced/Healthy |
-| `platform-status.sh` | Lists the EKS cluster, nodes, NAT Gateways, interface endpoints, load balancers and Elastic IPs, and says RUNNING or STOPPED |
+| `platform-stop.sh` | 1. Checks the AWS account; you type `stop`. Checks that your public IP may reach the cluster API (otherwise the clean-up cannot run). 2. Deletes the ArgoCD root app and the ApplicationSets (so nothing is re-created), then the other applications: the load balancer controller removes ALBs for deleted Ingresses, Karpenter removes its nodes. 3. Waits until no ALBs or Karpenter nodes remain (they are not in Terraform and would block the VPC deletion); deletes the EC2NodeClasses (Karpenter removes its instance profiles) and the PersistentVolumeClaims (the EBS CSI driver removes the volumes). 4. Uninstalls ArgoCD; removes leftover Karpenter instances, EBS volumes and `k8s-*` load balancer security groups. 5. `terraform plan -destroy` for `module.iam`, `module.eks`, `module.vpc` only (refuses if the plan touches ECR or secrets), you type `yes`, destroy. Removes the EKS log group if EKS re-created it |
+| `platform-start.sh` | 1. Checks the account and that your public IP is in `admin_cidrs`; removes a leftover EKS log group. 2. `terraform plan`, you type `yes`, apply. 3. Connects kubectl, waits for the nodes. 4. Installs ArgoCD (Helm), applies `root-app.yaml`, waits until every application is Synced/Healthy (restarts the ArgoCD controller once if it is stuck on the API schema). 5. Checks every Deployment's image tag exists in ECR and every ExternalSecret is synced, and lists what is missing |
+| `platform-status.sh` | Lists the EKS cluster, nodes, NAT Gateways, interface endpoints, load balancers and Elastic IPs, the kept ECR repositories (image count) and secrets, and says RUNNING or STOPPED |
 
-**Kept when stopped:** bootstrap stack (state bucket, KMS key, GitHub OIDC, pipeline roles), the Terraform
-state (now empty for Dev), and everything in Git.
+**Kept when stopped:** ECR repositories **with their images** and Secrets Manager secrets **with their values**
+(about $3–4 per month: $0.40 per secret, $1 for their KMS key, cents for image storage), the bootstrap stack
+(state bucket, KMS key, GitHub OIDC, pipeline roles), and everything in Git. Before 2026-10-16 a stop deleted the
+images too: after a start, staging and production asked for tags that no longer existed (ImagePullBackOff) until a
+tag was released again, and every secret value had to be stored again.
 
 **Lost when stopped, restore after a start:**
 
 | Item | Restore |
 |---|---|
-| Secret values in Secrets Manager | `aws secretsmanager put-secret-value ...` (the start script prints the command) |
-| Images in ECR | Re-run the `my-app` release pipeline (Day 6) or push the image again |
-| ArgoCD admin password | New initial password; change it again |
-| KMS keys (EKS secrets, app secrets) | New keys are created; the old ones are scheduled for deletion (no charge while pending) |
+| ArgoCD admin password | New initial password; change it again (the start script prints the command) |
+| Grafana admin password | New random password (the start script prints how to read it) |
+| KMS key for EKS secrets | A new key is created; the old one is scheduled for deletion (no charge while pending) |
+| Only after `--all`: images, secret values | The start script lists each missing image tag and secret, with the commands |
 
-Dev-only settings that make this possible: `secret_recovery_window_days = 0` (secrets can be re-created at once)
-and `ecr_force_delete = true` (the registry can be deleted with images in it). Staging and Production keep the
-safe defaults.
+Dev-only settings that make `--all` possible: `secret_recovery_window_days = 0` (secrets can be re-created at
+once) and `ecr_force_delete = true` (the registry can be deleted with images in it). Staging and Production keep
+the safe defaults.
 
 ### Trade-off of turning off the interface endpoints
 Without them, pulls from ECR, IRSA logins (STS) and secret reads go through the NAT Gateway: still encrypted
@@ -2131,7 +2135,11 @@ aws budgets create-budget --account-id 471112815218 \
 | Destroy hangs on the VPC, subnets or a security group | Something created by the cluster still exists: run `platform-status.sh`; delete leftover load balancers (EC2 → Load Balancers) or `k8s-*` security groups, then run the stop script again |
 | Start fails: log group `/aws/eks/platform-dev/cluster` already exists | `aws logs delete-log-group --log-group-name /aws/eks/platform-dev/cluster`, then start again |
 | Start stops at "Your IP ... is not in admin_cidrs" | Put the printed IP in `terraform.tfvars` and run again |
+| Stop stops at "Your IP ... is not allowed" | The same, but the cluster still runs: put the IP in `terraform.tfvars`, `terraform apply` (only `public_access_cidrs` changes), run the stop again |
+| Destroy fails: `DeleteConflict` on the Karpenter node role | An instance profile Karpenter created still holds the role: `aws iam list-instance-profiles-for-role --role-name platform-dev-karpenter-node`, then `remove-role-from-instance-profile` and `delete-instance-profile` for each, and run the stop again |
+| All applications `Unknown` after a start, "unable to handle the request" / "failed to load open api schema" | The script restarts the ArgoCD controller once. If it stays: `kubectl get apiservices \| grep -v True`; the 2026-10-16 cause was the metrics-server add-on version (pinned in `terraform/modules/eks/main.tf`, see `docs/runbook.md`) |
+| Start lists a MISSING image | dev: re-run the service's last main run; staging/production: release an existing tag (`helm-chart/scripts/release.sh`) |
+| Start lists a MISSING secret | `aws secretsmanager put-secret-value --secret-id platform-dev/<service>/<env> ...`, then force-sync the ExternalSecret (command in the script output) |
 | An application stays OutOfSync after a start | `kubectl describe application <name> -n argocd`; usually a missing secret value or image |
-<-- kyverno e2e 2026-10-13T12:19:15Z -->
 
 

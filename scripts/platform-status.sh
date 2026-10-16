@@ -34,8 +34,17 @@ printf '%-28s %s\n' "Interface VPC endpoints"   "$(count "$vpce")"
 printf '%-28s %s\n' "Load balancers"            "$(count "$lbs")"
 printf '%-28s %s\n' "Elastic IPs"               "$(count "$eips")"
 
+# Kept by a normal stop (cheap): images and secret values, so a start brings the services back as they were
+echo
+for repo in $(aws ecr describe-repositories --region "$REGION" --query 'repositories[].repositoryName' --output text 2>/dev/null); do
+  printf '%-28s %s\n' "ECR $repo" "$(aws ecr describe-images --region "$REGION" --repository-name "$repo" \
+                                       --query 'length(imageDetails)' --output text 2>/dev/null) images"
+done
+printf '%-28s %s\n' "Secrets platform-dev/*" "$(aws secretsmanager list-secrets --region "$REGION" \
+  --filters Key=name,Values=platform-dev/ --query 'length(SecretList)' --output text 2>/dev/null)"
+
 if [ "$eks" = "none" ] && [ "$(count "$nat$nodes$lbs$vpce$eips")" -eq 0 ]; then
-  echo; echo "STOPPED: only the state bucket and bootstrap key remain (a few cents per day)."
+  echo; echo "STOPPED: only images, secrets, the state bucket and keys remain (about \$3-4 per month)."
 else
   echo; echo "RUNNING: costs accrue. Stop with: bash scripts/platform-stop.sh"
 fi
