@@ -68,7 +68,12 @@ module "eks" {
       before_compute = true
     }
     # CPU/memory usage of pods: needed by the HorizontalPodAutoscaler and `kubectl top`
-    metrics-server = {}
+    # Pinned on purpose (without a version the module installs the newest one at every apply):
+    # v0.9.0-eksbuild.12 published an OpenAPI schema the API server could not serve as protobuf, and ArgoCD lost
+    # sight of the cluster (all apps Unknown, 2026-10-16). Upgrade only after the protobuf test (docs/runbook.md).
+    metrics-server = {
+      addon_version = "v0.9.0-eksbuild.13"
+    }
     # Creates EBS volumes for PersistentVolumeClaims (monitoring data). AWS access through EKS Pod Identity.
     aws-ebs-csi-driver = {
       pod_identity_association = [{
