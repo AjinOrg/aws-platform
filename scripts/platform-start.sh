@@ -73,7 +73,7 @@ cat <<EOF
                       done
   2. ArgoCD password: kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d
                       then change it (argocd account update-password) and delete that secret
-  3. App image:       ECR is empty after a rebuild: re-run the my-app release pipeline (Day 6) or push the image
+  3. App images:      ECR is empty after a rebuild: re-run the last main run of my-app and orders (run → Re-run all jobs)
   4. Grafana:         kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80  →  http://localhost:3000
                       password: kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d
 EOF

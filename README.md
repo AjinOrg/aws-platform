@@ -35,6 +35,7 @@ Until 2026-10-15 the chart and its values were in this repository; Step 16 moved
     - [Step 14: Monitoring](#10i-step-14-monitoring-metrics-logs-alerts-dashboards)
     - [Step 15: Load Test and CI Failure Demos](#10j-step-15-load-test-and-ci-failure-demos)
     - [Step 16: Charts and Values Move to helm-chart](#10k-step-16-charts-and-values-move-to-helm-chart)
+    - [Step 17: A Second Microservice (orders)](#10l-step-17-a-second-microservice-orders)
 11. [Build Progress (Days 1 to 6)](#11-build-progress-days-1-to-6)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Cost and Clean-up](#13-cost-and-clean-up)
@@ -1766,6 +1767,173 @@ with `kubectl get pods -n dev` (pods never stop) and `kubectl get applications -
 
 ---
 
+## 10l. Step 17: A Second Microservice (orders)
+
+**Why:** show the platform running several microservices, each with its own repository and pipeline, deployed by
+the same shared chart, and two services talking to each other inside the cluster.
+
+**What orders is** (`AjinOrg/orders`, developers): a small Python service (waitress) that serves sample orders and
+calls my-app at `http://my-app` (the Service in its own namespace). URL `http://<alb>/<env>/orders`.
+
+| | my-app | orders |
+|---|---|---|
+| Language | Node.js 22, no dependencies | Python 3.13, one dependency (waitress, hash-pinned) |
+| Depends on another service | no | **calls my-app** (reported in its answer; probes do not depend on it) |
+| Secrets / IRSA role | yes / yes | **no / no** (`secrets.enabled: false`, no `roleArn`): nothing in Secrets Manager or IAM for it |
+| Pipeline checks | ESLint, node test, npm audit + OWASP | ruff (incl. security rules), pytest, pip-audit, plus **container test** and **SBOM** |
+| ECR push role | `aws-platform-ecr-push` | **`orders-ecr-push`**: one role per service, each can push only to its own repository |
+
+**Changes in this repository**
+
+| File | Change | Why |
+|---|---|---|
+| `terraform/environments/dev/main.tf`, `outputs.tf` | `module "ecr_orders"` (same ECR module: immutable tags, scan on push, lifecycle) | The orders images |
+| `bootstrap/state-backend.yaml` | Parameters `OrdersRepo`, `OrdersRepoId`, `OrdersEcrRepository`; role `orders-ecr-push` (created once `OrdersRepoId` is set) | OIDC push from `AjinOrg/orders` main only, to `orders` only |
+| `gitops/platform-config/namespaces/*.yaml` | `allow-from-load-balancer` selects my-app **and** orders; new `allow-orders-to-my-app` (egress) and `allow-my-app-from-orders` (ingress), port 8080 | Default-deny blocks everything: without these the ALB gets 502 for orders and orders cannot reach my-app. Only orders → my-app is opened, not the reverse |
+| `.github/rulesets/orders-main.json` | Same rules as my-app, with orders' check names | Branch protection of `AjinOrg/orders` |
+| `scripts/platform-start.sh` | Reminder: after a rebuild, re-run the last main run of my-app **and** orders | ECR is emptied by a rebuild |
+
+Not changed: AppProject / ApplicationSet (a new folder in helm-chart is enough), Kyverno policies, External Secrets
+(orders has no secret). Monitoring alerts and the dashboard stay my-app only for now.
+
+**Planned (not done yet): push roles to Terraform.** Today every new service needs a CloudFormation template change
+and a stack update from a laptop (a new push role). Later, the ECR module will also create the service's push role,
+looped over one `services` map in `terraform.tfvars`, so a new service is one line in a reviewed PR (Terraform
+pipeline: plan, approval, apply). `moved` blocks keep the existing ECR repositories (plan must show 0 to destroy);
+my-app's pipeline then switches to `my-app-ecr-push`, and the old `EcrPushRole` and the orders additions leave the
+CloudFormation template, which then holds only the one-time resources. Do it before the third service.
+
+### Order of the steps (each one needs the one before)
+| # | Where | What | Needs |
+|---|---|---|---|
+| 1 | aws-platform PR | Terraform ECR `orders`, network policies, bootstrap template, ruleset file | — |
+| 2 | GitHub | Repository `AjinOrg/orders` with a first commit **without code** | — |
+| 3 | AWS (CloudFormation) | Bootstrap update with `OrdersRepoId` → role `orders-ecr-push` | repository ID (2) |
+| 4 | GitHub | orders settings: ruleset, GitHub App variable/key, optional `SONAR_TOKEN` | ruleset file (1) |
+| 5 | orders PR | The code and pipeline: every check runs on this PR. Merge → first image in ECR | ECR (1), role (3) |
+| 6 | helm-chart PR | `apps/orders/` with the first tag in all three environments | image tag (5), network policies (1) |
+| 7 | — | ArgoCD deploys `orders-dev/staging/production`; `verify.yaml` smoke-tests them | 6 |
+
+Why the code comes through a PR (step 5) and not in the first commit: checks run only on pull requests (the main
+run is the light one), so the first code must arrive as a PR to be checked at all. Why helm-chart comes after the
+first image: the values need a real tag. Until orders is registered in helm-chart, its pipeline skips the Kyverno
+step and the dev PR with a warning (nothing can deploy the image yet), and helm-chart's ci runs the same Kyverno
+policies on the registering PR.
+
+### 1. aws-platform pull request
+```bash
+cd ~/workspace/Task/aws-platform && git checkout main && git pull
+git checkout -b feat/orders-service
+# copy the changed files (listed above), then:
+git add -A && git status
+gitleaks git --pre-commit --staged -v
+git commit -m "orders: ECR repository, push role, network policies, ruleset"
+git push -u origin feat/orders-service && gh pr create --fill
+gh pr checks --watch            # platform-ci + Terraform plan comment: "Plan: 2 to add" (repository + lifecycle policy)
+gh pr merge --squash --delete-branch   # admin bypass while there is one Code Owner, as before
+```
+After the merge: Actions → Terraform → *Review deployments* → approve the apply. ArgoCD syncs the network policies.
+```bash
+aws ecr describe-repositories --repository-names orders --query 'repositories[0].repositoryUri' --output text
+kubectl get networkpolicy -n dev     # allow-from-load-balancer, allow-orders-to-my-app, allow-my-app-from-orders, ...
+```
+
+### 2. Create the orders repository (first commit without code)
+```bash
+cd ~/workspace/Task/orders
+git init -b main
+git add README.md .gitignore
+git commit -m "orders: README"
+gh repo create AjinOrg/orders --public --source=. --remote=origin --push
+gh api repos/AjinOrg/orders --jq .id                               # → OrdersRepoId
+gh api repos/AjinOrg/orders/actions/oidc/customization/sub         # use_immutable_subject: true expected
+```
+
+### 3. Bootstrap update: role orders-ecr-push
+As in "Changing a parameter later" (Step 4), with the two new IDs added:
+```bash
+cd ~/workspace/Task/aws-platform
+HELM_ID=$(gh api repos/AjinOrg/helm-chart --jq .id); ORDERS_ID=$(gh api repos/AjinOrg/orders --jq .id)
+aws cloudformation deploy --template-file bootstrap/state-backend.yaml --stack-name aws-platform-bootstrap \
+  --parameter-overrides StateBucketName=aws-platform-tfstate-471112815218 GitHubOrg=AjinOrg \
+      GitHubOrgId=339973007 AppRepoId=1411604810 PlatformRepoId=1411566444 \
+      HelmChartRepoId=$HELM_ID OrdersRepoId=$ORDERS_ID \
+  --capabilities CAPABILITY_NAMED_IAM --no-execute-changeset
+CS=$(aws cloudformation list-change-sets --stack-name aws-platform-bootstrap \
+       --query "sort_by(Summaries,&CreationTime)[-1].ChangeSetName" --output text); echo "CS=[$CS]"
+aws cloudformation describe-change-set --stack-name aws-platform-bootstrap --change-set-name "$CS" \
+  --query "Changes[].ResourceChange.[Action,LogicalResourceId,Replacement]" --output table
+# expect ONLY: Add OrdersEcrPushRole. Anything else (e.g. HelmChartReadOnlyRole Remove) → stop and check the IDs
+aws cloudformation execute-change-set --stack-name aws-platform-bootstrap --change-set-name "$CS"
+aws cloudformation wait stack-update-complete --stack-name aws-platform-bootstrap
+aws iam get-role --role-name orders-ecr-push --query "Role.AssumeRolePolicyDocument.Statement[0].Condition" --output json
+# sub = repo:AjinOrg@339973007/orders@<ORDERS_ID>:ref:refs/heads/main
+```
+
+### 4. Repository settings
+```bash
+gh repo edit AjinOrg/orders --delete-branch-on-merge
+gh api -X POST repos/AjinOrg/orders/rulesets --input ~/workspace/Task/aws-platform/.github/rulesets/orders-main.json \
+  --jq '"\(.id) \(.name) \(.enforcement)"'
+# GitHub App (opens the dev PRs in helm-chart; it is already installed there): same variable and key as my-app
+gh variable set PLATFORM_APP_ID -R AjinOrg/orders --body "$APP_ID"
+gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/orders < "$KEY"
+# Optional: SonarQube Cloud → Analyze new project → AjinOrg/orders, Automatic Analysis off, then
+#   gh secret set SONAR_TOKEN -R AjinOrg/orders        (without it the job passes with a warning)
+```
+
+### 5. The code, through a pull request
+```bash
+cd ~/workspace/Task/orders
+git checkout -b feat/orders-service
+git add -A && git status        # no .venv, __pycache__, coverage.xml (in .gitignore)
+gitleaks git --pre-commit --staged -v
+git commit -m "orders: Python service calling my-app, pipeline"
+git push -u origin feat/orders-service && gh pr create --fill
+gh pr checks --watch            # 6 checks; Kyverno step warns "apps/orders does not exist in helm-chart yet"
+gh pr merge --squash --delete-branch
+git checkout main && git pull && TAG=$(git rev-parse --short=7 HEAD); echo "TAG=$TAG"
+gh run watch -R AjinOrg/orders $(gh run list -R AjinOrg/orders --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+aws ecr describe-images --repository-name orders --query 'imageDetails[].imageTags' --output text   # → $TAG
+```
+
+### 6. Register orders in helm-chart
+```bash
+cd ~/workspace/Task/helm-chart && git checkout main && git pull
+git checkout -b feat/orders
+# copy apps/orders/ (values.yaml, values-dev/staging/production.yaml, smoke-test.sh), then:
+sed -i "s/<first-tag>/$TAG/" apps/orders/values-*.yaml && grep -h 'tag:' apps/orders/values-*.yaml
+chmod +x apps/orders/smoke-test.sh
+bash scripts/render-all.sh && ls rendered/ | grep orders
+git add apps/orders && git commit -m "apps: register orders ($TAG)"
+git push -u origin feat/orders && gh pr create --fill
+gh pr checks --watch
+gh pr merge --squash --admin --delete-branch   # values-production.yaml needs a Code Owner; one-time admin bypass
+```
+
+### 7. Verify
+```bash
+kubectl get applications -n argocd | grep orders           # orders-dev/staging/production Synced Healthy
+kubectl get deploy -A -l app.kubernetes.io/part-of=aws-platform   # my-app and orders in all three namespaces
+ALB=$(kubectl get ingress -n dev -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+for e in dev staging production; do
+  curl -s http://$ALB/$e/orders | jq -c '{environment, version, my_app: .dependencies["my-app"]}'
+done                                                        # my_app.reachable: true, my_app.environment = same env
+curl -s http://$ALB/dev/orders/api/orders | jq .count       # 3
+gh run list -R AjinOrg/helm-chart --workflow verify.yaml --limit 1   # smoke tests of the three environments
+```
+Demo, network policy at work: remove the rule that lets my-app accept orders, and orders reports my-app as
+unreachable (a timeout); ArgoCD self-heal (Application `app-namespaces`) puts the rule back, and orders reaches my-app again.
+```bash
+kubectl delete networkpolicy allow-my-app-from-orders -n dev
+curl -s http://$ALB/dev/orders | jq -c '.dependencies["my-app"]'   # reachable: false, error: TimeoutError/URLError
+```
+
+From here on orders works like my-app: a merge deploys to dev automatically, and `scripts/release.sh` in
+helm-chart lists both services for staging and production.
+
+---
+
 ## 11. Build Progress (Days 1 to 6)
 
 Tick each item as it is done.
@@ -1815,6 +1983,7 @@ Tick each item as it is done.
 - [ ] Planned: pipeline caching (Docker layers, Trivy DB) (see "Pipeline speed" in Step 11)
 - [x] Lighter main run (build, Trivy image, Kyverno, push) + "branch must be up to date" rule on my-app (main run ~1 min instead of ~2–2.5 min); merge queue later when the team merges many times a day
 - [x] Step 16 (2026-10-15/16): charts, values and releases moved to `AjinOrg/helm-chart` (release team); one shared chart for all microservices, chart versions pinned per environment; URLs `/<env>/<service>`
+- [ ] Step 17: second microservice `orders` (Python, calls my-app): ECR + push role + network policies, repository and pipeline, registered in helm-chart, smoke-tested in all three environments
 
 ### POC scope: remaining work (agreed 2026-10-13)
 The POC is complete with the items below. Production-grade work starts only after the POC is accepted.

@@ -39,6 +39,10 @@ output "ecr_repository_url" {
   value = module.ecr.repository_url
 }
 
+output "orders_ecr_repository_url" {
+  value = module.ecr_orders.repository_url
+}
+
 output "app_secret_names" {
   value = module.secrets.secret_names
 }

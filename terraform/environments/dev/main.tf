@@ -42,6 +42,14 @@ module "ecr" {
   force_delete = var.ecr_force_delete
 }
 
+# orders (second sample service). Separate repository: its pipeline role may push only here
+module "ecr_orders" {
+  source = "../../modules/ecr"
+
+  name         = "orders"
+  force_delete = var.ecr_force_delete
+}
+
 module "secrets" {
   source = "../../modules/secrets"
 
