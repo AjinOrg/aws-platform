@@ -54,6 +54,7 @@ module "secrets" {
   source = "../../modules/secrets"
 
   name                 = local.name
+  services             = var.services_with_secrets
   namespaces           = var.app_namespaces
   recovery_window_days = var.secret_recovery_window_days
 }

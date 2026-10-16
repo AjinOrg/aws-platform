@@ -1,6 +1,6 @@
-# Secrets Manager secrets for the application, one per namespace, encrypted with a dedicated KMS key.
-# Terraform creates only the empty secret; an administrator stores the value with the AWS CLI,
-# so the value never appears in Git or in the Terraform state.
+# Secrets Manager secrets for the services, one per service and namespace (<name>/<service>/<namespace>),
+# encrypted with a dedicated KMS key. Terraform creates only the empty secret; an administrator stores the value
+# with the AWS CLI, so the value never appears in Git or in the Terraform state.
 
 terraform {
   required_version = ">= 1.10"
@@ -18,13 +18,14 @@ variable "name" {
   type        = string
 }
 
-variable "app_name" {
-  type    = string
-  default = "my-app"
+variable "services" {
+  description = "Services that read secrets (helm-chart secrets.enabled); each gets one secret per namespace"
+  type        = list(string)
+  default     = ["my-app"]
 }
 
 variable "namespaces" {
-  description = "One secret per namespace: <name>/<app>/<namespace>"
+  description = "One secret per service and namespace: <name>/<service>/<namespace>"
   type        = list(string)
 }
 
@@ -60,17 +61,37 @@ resource "aws_kms_alias" "secrets" {
   target_key_id = aws_kms_key.secrets.key_id
 }
 
+# Key "<service>/<namespace>", e.g. "orders/dev"
 resource "aws_secretsmanager_secret" "app" {
-  for_each = toset(var.namespaces)
+  for_each = {
+    for pair in setproduct(var.services, var.namespaces) : "${pair[0]}/${pair[1]}" => { service = pair[0], namespace = pair[1] }
+  }
 
-  name                    = "${var.name}/${var.app_name}/${each.value}"
-  description             = "${var.app_name} settings for the ${each.value} namespace (synced by External Secrets Operator)"
+  name                    = "${var.name}/${each.key}"
+  description             = "${each.value.service} settings for the ${each.value.namespace} namespace (synced by External Secrets Operator)"
   kms_key_id              = aws_kms_key.secrets.arn
   recovery_window_in_days = var.recovery_window_days
 }
 
+# The my-app secrets were keyed by namespace only (one service). Same secrets, new keys: nothing is recreated,
+# so the stored values stay.
+moved {
+  from = aws_secretsmanager_secret.app["dev"]
+  to   = aws_secretsmanager_secret.app["my-app/dev"]
+}
+
+moved {
+  from = aws_secretsmanager_secret.app["staging"]
+  to   = aws_secretsmanager_secret.app["my-app/staging"]
+}
+
+moved {
+  from = aws_secretsmanager_secret.app["production"]
+  to   = aws_secretsmanager_secret.app["my-app/production"]
+}
+
 output "secret_arns" {
-  description = "Map of namespace => secret ARN"
+  description = "Map of <service>/<namespace> => secret ARN"
   value       = { for ns, s in aws_secretsmanager_secret.app : ns => s.arn }
 }
 

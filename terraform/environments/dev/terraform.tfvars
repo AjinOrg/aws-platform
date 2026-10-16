@@ -29,7 +29,9 @@ system_max_size       = 3
 system_desired_size   = 2
 
 # ---- application
-# Initial delivery: one cluster runs all three namespaces; dedicated clusters come later
+# Initial delivery: one cluster runs all three namespaces; dedicated clusters come later.
+# services_with_secrets: one Secrets Manager secret per service and namespace (plus secrets.enabled in helm-chart)
 app_namespaces              = ["dev", "staging", "production"]
+services_with_secrets       = ["my-app", "orders"]
 secret_recovery_window_days = 0    # Dev only: lets a destroyed environment be rebuilt at once
 ecr_force_delete            = true # Dev/POC only: scripts/platform-stop.sh can destroy the registry with its images

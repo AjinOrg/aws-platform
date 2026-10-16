@@ -70,6 +70,11 @@ variable "app_namespaces" {
   type        = list(string)
 }
 
+variable "services_with_secrets" {
+  description = "Services with a Secrets Manager secret per namespace (platform-dev/<service>/<namespace>)"
+  type        = list(string)
+}
+
 variable "secret_recovery_window_days" {
   type = number
 }
