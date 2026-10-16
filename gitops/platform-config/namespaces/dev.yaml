@@ -43,11 +43,55 @@ spec:
         - protocol: TCP
           port: 53
 ---
-# 3. The load balancer (in the public subnets 10.0.96.0/24-10.0.98.0/24) may reach the app on its port
+# 3. The load balancer (in the public subnets 10.0.96.0/24-10.0.98.0/24) may reach the services on their port.
+#    Every service behind the ALB is listed here (a new service in helm-chart also needs a line: no 502s from day one).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-from-load-balancer
+  namespace: dev
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [my-app, orders]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.96.0/22
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 4. Service to service: orders may call my-app (egress from orders) ...
+#    Port 8080 = the pod port: the policy sees traffic after the Service (port 80) has forwarded it to a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orders-to-my-app
+  namespace: dev
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orders
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: my-app
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 5. ... and my-app accepts it (ingress to my-app). Both sides are needed with default-deny in both directions.
+#    Only this direction is opened: my-app cannot call orders.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-my-app-from-orders
   namespace: dev
 spec:
   podSelector:
@@ -56,8 +100,9 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     - from:
-        - ipBlock:
-            cidr: 10.0.96.0/22
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orders
       ports:
         - protocol: TCP
           port: 8080

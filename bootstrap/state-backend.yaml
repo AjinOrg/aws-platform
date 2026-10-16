@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   aws-platform bootstrap (one time per AWS account): Terraform state bucket, its KMS key,
-  GitHub OIDC provider and the pipeline roles (ECR push, Terraform plan, Terraform apply, helm-chart read-only).
+  GitHub OIDC provider and the pipeline roles (ECR push per service, Terraform plan, Terraform apply,
+  helm-chart read-only).
 
 Parameters:
   StateBucketName:
@@ -59,6 +60,19 @@ Parameters:
     Default: ""
     AllowedPattern: "^[0-9]*$"
     Description: Numeric ID of the helm-chart repository (with the immutable subject, the role is created only once this is set)
+  OrdersRepo:
+    Type: String
+    Default: orders
+    Description: Repository of the second sample service (developers)
+  OrdersRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric ID of the orders repository (with the immutable subject, the role is created only once this is set)
+  OrdersEcrRepository:
+    Type: String
+    Default: orders
+    Description: ECR repository the orders pipeline pushes to (Terraform module ecr_orders)
 
 Conditions:
   CreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
@@ -67,6 +81,9 @@ Conditions:
   CreateHelmChartRole: !Or
     - !Not [!Condition ImmutableSubject]
     - !Not [!Equals [!Ref HelmChartRepoId, ""]]
+  CreateOrdersEcrPushRole: !Or
+    - !Not [!Condition ImmutableSubject]
+    - !Not [!Equals [!Ref OrdersRepoId, ""]]
 
 Resources:
   # ---------------------------------------------------------------- state storage
@@ -204,6 +221,51 @@ Resources:
                   - ecr:UploadLayerPart
                 Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${AppEcrRepository}"
 
+  # One push role per service, not one shared role: the orders pipeline can push only to orders, so a mistake or
+  # a compromised workflow in one service repository cannot replace another service's images.
+  OrdersEcrPushRole:
+    Type: AWS::IAM::Role
+    Condition: CreateOrdersEcrPushRole
+    Properties:
+      RoleName: orders-ecr-push
+      Description: orders pipeline (main branch only) pushes images to the orders ECR repository
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "${Repo}:ref:refs/heads/main"
+                  - Repo: !If
+                      - ImmutableSubject
+                      - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${OrdersRepo}@${OrdersRepoId}"
+                      - !Sub "repo:${GitHubOrg}/${OrdersRepo}"
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeImageScanFindings
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${OrdersEcrRepository}"
+
   TerraformPlanRole:
     Type: AWS::IAM::Role
     Properties:
@@ -312,6 +374,9 @@ Outputs:
     Value: !GetAtt StateKey.Arn
   EcrPushRoleArn:
     Value: !GetAtt EcrPushRole.Arn
+  OrdersEcrPushRoleArn:
+    Condition: CreateOrdersEcrPushRole
+    Value: !GetAtt OrdersEcrPushRole.Arn
   TerraformPlanRoleArn:
     Value: !GetAtt TerraformPlanRole.Arn
   TerraformApplyRoleArn:
